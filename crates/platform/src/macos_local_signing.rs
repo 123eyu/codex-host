@@ -1,7 +1,9 @@
 use std::error::Error;
 use std::fs;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(any(target_os = "macos", test))]
+use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
