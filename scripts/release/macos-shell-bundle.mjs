@@ -1,13 +1,16 @@
+import { execFileSync } from "node:child_process";
 import { chmod, copyFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export const MACOS_SHELL_APP_RELATIVE = "libexec/CodexHost.app";
 export const MACOS_SHELL_EXECUTABLE_PATH = `${MACOS_SHELL_APP_RELATIVE}/Contents/MacOS/CodexHost`;
+export const MACOS_SHELL_SIGNATURE_PATH = `${MACOS_SHELL_APP_RELATIVE}/Contents/_CodeSignature/CodeResources`;
 export const MACOS_SHELL_BUNDLE_PATHS = Object.freeze([
   `${MACOS_SHELL_APP_RELATIVE}/Contents/Info.plist`,
   MACOS_SHELL_EXECUTABLE_PATH,
   `${MACOS_SHELL_APP_RELATIVE}/Contents/PkgInfo`,
   `${MACOS_SHELL_APP_RELATIVE}/Contents/Resources/AppIcon.icns`,
+  MACOS_SHELL_SIGNATURE_PATH,
 ]);
 
 function escapeXml(value) {
@@ -56,13 +59,28 @@ export function createMacosShellInfoPlist(version) {
 `;
 }
 
+export function signMacosShellBundle(appPath, { signIdentity } = {}) {
+  const identity = signIdentity ?? (process.env.CODEXHOST_MACOS_SIGN_IDENTITY || "-");
+  // Bind Info.plist (CFBundleIdentifier = com.codexhost.shell) and seal bundle resources so
+  // macOS usernotificationsd matches the signing identifier instead of the linker-signed binary name.
+  execFileSync("/usr/bin/codesign", ["--force", "--sign", identity, appPath], {
+    stdio: "pipe",
+  });
+  execFileSync("/usr/bin/codesign", ["--verify", "--deep", "--strict", appPath], {
+    stdio: "pipe",
+  });
+}
+
 export async function stageMacosShellBundle({
   sourceExecutable,
   iconSource,
   destinationRoot,
   version,
+  sign = process.platform === "darwin",
+  signIdentity,
 }) {
-  const contentsDir = path.join(destinationRoot, MACOS_SHELL_APP_RELATIVE, "Contents");
+  const appPath = path.join(destinationRoot, MACOS_SHELL_APP_RELATIVE);
+  const contentsDir = path.join(appPath, "Contents");
   const macosDir = path.join(contentsDir, "MacOS");
   const resourcesDir = path.join(contentsDir, "Resources");
   await mkdir(macosDir, { recursive: true });
@@ -75,4 +93,7 @@ export async function stageMacosShellBundle({
   await copyFile(iconSource, path.join(resourcesDir, "AppIcon.icns"));
   await writeFile(path.join(contentsDir, "PkgInfo"), "APPL????", "utf8");
   await writeFile(path.join(contentsDir, "Info.plist"), createMacosShellInfoPlist(version), "utf8");
+  if (sign) {
+    signMacosShellBundle(appPath, { signIdentity });
+  }
 }

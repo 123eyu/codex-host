@@ -1,8 +1,15 @@
-import { readFile } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
-import { createMacosShellInfoPlist } from "../../scripts/release/macos-shell-bundle.mjs";
+import {
+  MACOS_SHELL_APP_RELATIVE,
+  MACOS_SHELL_SIGNATURE_PATH,
+  createMacosShellInfoPlist,
+  stageMacosShellBundle,
+} from "../../scripts/release/macos-shell-bundle.mjs";
 
 const root = path.resolve(import.meta.dirname, "../..");
 
@@ -36,6 +43,37 @@ describe("platform packagers", () => {
     expect(source).not.toContain("ditto -c -k");
     expect(source).not.toContain("cargo-packager");
   });
+
+  it.runIf(process.platform === "darwin")(
+    "ad-hoc signs staged macOS CodexHost.app with com.codexhost.shell identifier",
+    async () => {
+      const work = await mkdtemp(path.join(os.tmpdir(), "codexhost-shell-bundle-test-"));
+      try {
+        await stageMacosShellBundle({
+          sourceExecutable: "/usr/bin/true",
+          iconSource: path.join(root, "apps/desktop-shell/src-tauri/icons/AppIcon.icns"),
+          destinationRoot: work,
+          version: "0.29.0",
+        });
+        const appPath = path.join(work, MACOS_SHELL_APP_RELATIVE);
+        const signatureStats = await stat(path.join(work, MACOS_SHELL_SIGNATURE_PATH));
+        expect(signatureStats.isFile()).toBe(true);
+        execFileSync("/usr/bin/codesign", ["--verify", "--deep", "--strict", appPath], {
+          stdio: "pipe",
+        });
+        const details = spawnSync("/usr/bin/codesign", ["-dvv", appPath], {
+          encoding: "utf8",
+        });
+        expect(details.status).toBe(0);
+        const signatureOutput = `${details.stdout}${details.stderr}`;
+        expect(signatureOutput).toContain("Identifier=com.codexhost.shell");
+        expect(signatureOutput).toMatch(/Info\.plist entries=\d+/u);
+        expect(signatureOutput).not.toContain("Info.plist=not bound");
+      } finally {
+        await rm(work, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("publishes one tag-bound four-platform installer and npm release", async () => {
     const [workflow, releaseBuilder, releaseClient, releaseValidation] = await Promise.all([

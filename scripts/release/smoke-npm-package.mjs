@@ -9,7 +9,7 @@ import {
   verifyLinuxGlibcBaseline,
   verifyLinuxGlibcLoad,
 } from "./linux-glibc.mjs";
-import { MACOS_SHELL_EXECUTABLE_PATH } from "./macos-shell-bundle.mjs";
+import { MACOS_SHELL_APP_RELATIVE, MACOS_SHELL_EXECUTABLE_PATH } from "./macos-shell-bundle.mjs";
 import {
   NPM_PLATFORM_PACKAGE_NAMES,
   npmTarballFileName,
@@ -97,6 +97,13 @@ export async function smokeNpmPackage({ targetName, version, workDirectory }) {
         const mode = (await stat(path.join(packageRoot, relative))).mode & 0o777;
         if ((mode & 0o111) === 0) throw new Error(`${relative} is not executable`);
       }
+    }
+    if (target.hostPlatform === "darwin") {
+      execFileSync(
+        "/usr/bin/codesign",
+        ["--verify", "--deep", "--strict", path.join(packageRoot, MACOS_SHELL_APP_RELATIVE)],
+        { stdio: "inherit" },
+      );
     }
     const command = path.join(
       directory,
