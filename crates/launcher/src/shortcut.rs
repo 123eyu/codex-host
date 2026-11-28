@@ -10,14 +10,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::installation_layout::is_source_checkout_build;
-use crate::{
-    NPM_LAUNCHER_PATH_ENV, NPM_NODE_PATH_ENV, NPM_PACKAGE_ROOT_ENV, host_service, startup_record,
-};
+#[cfg(target_os = "macos")]
+use crate::{NPM_LAUNCHER_PATH_ENV, NPM_NODE_PATH_ENV};
+use crate::{NPM_PACKAGE_ROOT_ENV, host_service, startup_record};
 
 const PROMPT_FILE: &str = "shortcut-prompt-v1.json";
 const PROMPT_VERSION: u8 = 1;
 const NO_PROMPT_ENV: &str = "CODEXHOST_NO_SHORTCUT_PROMPT";
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 const MACOS_SHORTCUT_DIR_ENV: &str = "CODEXHOST_SHORTCUT_DIR";
 #[cfg(any(target_os = "macos", test))]
 const MACOS_BUNDLE_NAME: &str = "codexhost.app";
