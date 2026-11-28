@@ -1101,6 +1101,7 @@ describe("npm package release", () => {
       expect(paths).toContain("libexec/CodexHost.app/Contents/MacOS/CodexHost");
       expect(paths).toContain("libexec/CodexHost.app/Contents/PkgInfo");
       expect(paths).toContain("libexec/CodexHost.app/Contents/Resources/AppIcon.icns");
+      expect(paths).toContain("libexec/CodexHost.app/Contents/_CodeSignature/CodeResources");
       expect(paths).not.toContain("libexec/codexhost-shell");
       expect(expectedNpmPackagePaths(releaseTarget("windows-x64"))).toContain(
         "libexec/codexhost-node-repl.exe",

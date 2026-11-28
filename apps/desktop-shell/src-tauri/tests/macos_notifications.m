@@ -15,6 +15,10 @@ extern int32_t codexhost_macos_notifications_select_backend(
     int has_legacy_center
 );
 extern int32_t codexhost_macos_notifications_map_un_status(int64_t status);
+API_AVAILABLE(macos(10.14))
+extern int32_t codexhost_macos_notifications_is_not_allowed_error(NSError * _Nullable error);
+API_AVAILABLE(macos(10.14))
+extern int32_t codexhost_macos_notifications_resolve_not_allowed_status(int64_t status);
 extern int32_t codexhost_macos_notifications_active_backend(void);
 extern void codexhost_macos_notifications_install(CHNotificationClickCallback on_click);
 extern void codexhost_macos_notifications_get_permission(void *ctx, CHPermissionCallback callback);
@@ -132,6 +136,32 @@ static void verifyUNDelegate(void) API_AVAILABLE(macos(10.14)) {
     NSCAssert(codexhost_macos_notifications_map_un_status(UNAuthorizationStatusDenied) == 1, @"denied");
     NSCAssert(codexhost_macos_notifications_map_un_status(UNAuthorizationStatusNotDetermined) == 2, @"prompt");
     NSCAssert(codexhost_macos_notifications_map_un_status(99) == 3, @"unknown -> unsupported");
+
+    NSError *notAllowedErr = [NSError errorWithDomain:UNErrorDomain
+                                                 code:UNErrorCodeNotificationsNotAllowed
+                                             userInfo:nil];
+    NSError *otherUnErr = [NSError errorWithDomain:UNErrorDomain
+                                              code:UNErrorCodeAttachmentInvalidURL
+                                          userInfo:nil];
+    NSError *otherDomainErr = [NSError errorWithDomain:NSCocoaErrorDomain
+                                                  code:UNErrorCodeNotificationsNotAllowed
+                                              userInfo:nil];
+    NSCAssert(codexhost_macos_notifications_is_not_allowed_error(notAllowedErr) == 1, @"UNErrorDomain error 1");
+    NSCAssert(codexhost_macos_notifications_is_not_allowed_error(otherUnErr) == 0, @"other UNError code");
+    NSCAssert(codexhost_macos_notifications_is_not_allowed_error(otherDomainErr) == 0, @"non-UN error domain");
+    NSCAssert(codexhost_macos_notifications_is_not_allowed_error(nil) == 0, @"nil error");
+    NSCAssert(
+        codexhost_macos_notifications_resolve_not_allowed_status(UNAuthorizationStatusDenied) == 1,
+        @"not-allowed with Denied status maps to denied"
+    );
+    NSCAssert(
+        codexhost_macos_notifications_resolve_not_allowed_status(UNAuthorizationStatusNotDetermined) == 3,
+        @"not-allowed with NotDetermined status maps to unsupported"
+    );
+    NSCAssert(
+        codexhost_macos_notifications_resolve_not_allowed_status(UNAuthorizationStatusAuthorized) == 3,
+        @"not-allowed with Authorized status maps to unsupported"
+    );
 
     CHUNNotificationDelegate *unDelegate = [CHUNNotificationDelegate sharedDelegate];
     id dummyCenter = [NSObject new];

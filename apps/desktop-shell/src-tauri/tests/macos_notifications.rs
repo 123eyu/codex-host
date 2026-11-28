@@ -21,6 +21,8 @@ fn macos_notifications_bridge_handles_bundle_modes_and_delegates() {
                 "Foundation",
                 "-framework",
                 "UserNotifications",
+                "-framework",
+                "CoreServices",
             ])
             .args([
                 "tests/macos_notifications.m",
@@ -49,6 +51,8 @@ fn macos_notifications_bridge_handles_bundle_modes_and_delegates() {
                 "Foundation",
                 "-framework",
                 "UserNotifications",
+                "-framework",
+                "CoreServices",
                 "-Wl,-sectcreate",
                 "-Wl,__TEXT",
                 "-Wl,__info_plist",

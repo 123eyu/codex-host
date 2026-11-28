@@ -9,9 +9,11 @@
 // unavailable) use event-driven NSUserNotificationCenter delegates instead.
 // Unbundled binaries without any bundle identifier degrade safely to Unsupported.
 
+#import <CoreServices/CoreServices.h>
 #import <Foundation/Foundation.h>
 #import <UserNotifications/UserNotifications.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <strings.h>
 
 typedef void (*CHNotificationClickCallback)(const char *session_id);
@@ -91,6 +93,24 @@ int32_t codexhost_macos_notifications_map_un_status(int64_t status) {
     return CH_PERM_UNSUPPORTED;
 }
 
+API_AVAILABLE(macos(10.14))
+int32_t codexhost_macos_notifications_is_not_allowed_error(NSError * _Nullable error) {
+    if (error == nil) {
+        return 0;
+    }
+    return ([error.domain isEqualToString:UNErrorDomain] &&
+            error.code == UNErrorCodeNotificationsNotAllowed)
+        ? 1
+        : 0;
+}
+
+API_AVAILABLE(macos(10.14))
+int32_t codexhost_macos_notifications_resolve_not_allowed_status(int64_t status) {
+    return ((UNAuthorizationStatus)status == UNAuthorizationStatusDenied)
+        ? CH_PERM_DENIED
+        : CH_PERM_UNSUPPORTED;
+}
+
 static BOOL isAppBundleMainProcess(void) {
     NSBundle *bundle = [NSBundle mainBundle];
     return bundle.bundleIdentifier.length > 0 &&
@@ -105,6 +125,11 @@ static UNUserNotificationCenter *unCenterOrNil(void) {
     static UNUserNotificationCenter *cached = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        NSURL *bundleURL = [NSBundle mainBundle].bundleURL;
+        if (bundleURL != nil) {
+            // Ensure LaunchServices indexes bundles spawned directly from npm/libexec paths.
+            (void)LSRegisterURL((__bridge CFURLRef)bundleURL, true);
+        }
         @try {
             cached = [UNUserNotificationCenter currentNotificationCenter];
         } @catch (NSException *exception) {
@@ -380,6 +405,29 @@ void codexhost_macos_notifications_request_permission(void *ctx, CHRequestPermis
                         [center requestAuthorizationWithOptions:options completionHandler:^(BOOL granted, NSError * _Nullable error) {
                             @autoreleasepool {
                                 if (error != nil && !granted) {
+                                    if (codexhost_macos_notifications_is_not_allowed_error(error)) {
+                                        fprintf(
+                                            stderr,
+                                            "CodexHost: macOS notifications not allowed (%s code %ld): %s\n",
+                                            error.domain.UTF8String ?: "UNErrorDomain",
+                                            (long)error.code,
+                                            error.localizedDescription.UTF8String ?: "unknown error"
+                                        );
+                                        @try {
+                                            [center getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings *settings) {
+                                                @autoreleasepool {
+                                                    int32_t resolved = codexhost_macos_notifications_resolve_not_allowed_status(
+                                                        (int64_t)settings.authorizationStatus
+                                                    );
+                                                    callback(ctx, resolved, NULL);
+                                                }
+                                            }];
+                                        } @catch (NSException *exception) {
+                                            (void)exception;
+                                            callback(ctx, CH_PERM_UNSUPPORTED, NULL);
+                                        }
+                                        return;
+                                    }
                                     callback(ctx, CH_PERM_UNSUPPORTED, error.localizedDescription.UTF8String);
                                     return;
                                 }

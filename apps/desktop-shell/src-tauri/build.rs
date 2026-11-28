@@ -14,6 +14,7 @@ fn main() {
             .flag("-Wextra")
             .compile("codexhost_macos_notifications");
         println!("cargo:rustc-link-lib=framework=UserNotifications");
+        println!("cargo:rustc-link-lib=framework=CoreServices");
     }
     // Unbundled macOS debug runs (`npm start app`) need an embedded Info.plist
     // so WKWebView exposes `navigator.mediaDevices` for voice input.
