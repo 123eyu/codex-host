@@ -129,14 +129,15 @@ mod tests {
 
     #[test]
     fn parses_app_and_json_options() {
+        let sample_app = std::env::temp_dir().join("codexhost.app");
         let (app, json) = parse_optional_app_flag(&[
             "--json".into(),
             "--app".into(),
-            "/Applications/codexhost.app".into(),
+            sample_app.to_string_lossy().into_owned(),
         ])
         .unwrap();
         assert!(json);
-        assert_eq!(app, Some(PathBuf::from("/Applications/codexhost.app")));
+        assert_eq!(app, Some(sample_app));
 
         assert!(parse_optional_app_flag(&["--app".into(), "relative.app".into()]).is_err());
         assert!(parse_optional_app_flag(&["--unknown".into()]).is_err());
