@@ -57,6 +57,7 @@ Load a skill only when its task occurs; read its `SKILL.md` before following it.
 
 | Task | Skill |
 | --- | --- |
+| Autonomous repo maintenance loop tick (0-token preflight, tiered PR review, green/yellow/red gating) | [codexhost-repo-loop](.agents/skills/codexhost-repo-loop/SKILL.md) |
 | Version releases, Release Notes, preview channels, and release recovery | [codexhost-release](.agents/skills/codexhost-release/SKILL.md) |
 | Triage a batch of PRs: overview table with 1–5 score, real-test plan, merge/close/label after approval | [codexhost-pr-overview](.agents/skills/codexhost-pr-overview/SKILL.md) |
 | Reviewing a PR or local diff for correctness and boundaries | [codexhost-code-review](.agents/skills/codexhost-code-review/SKILL.md) |
@@ -68,6 +69,7 @@ Load a skill only when its task occurs; read its `SKILL.md` before following it.
 ## Implementation Principles
 
 - Inspect related implementations, tests, contracts, and documentation before making changes. Prefer established repository patterns and public APIs over parallel implementations.
+- Check [LESSONS.md](LESSONS.md) for known repository pitfalls and compatibility invariants before reviewing or editing risky paths.
 - Reuse code only when semantics and ownership are aligned. Abstractions and encapsulation should solve current, concrete problems; avoid layers of indirection without a clear benefit.
 - Use as few concepts, states, entry points, and runtime actions as possible to express the real business flow directly.
 - Keep changes narrowly scoped. Avoid unrelated refactors, renames, dependency upgrades, or formatting churn.
