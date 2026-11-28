@@ -4,6 +4,7 @@ import Smartphone from "lucide/dist/esm/icons/smartphone.mjs";
 import Boxes from "lucide/dist/esm/icons/boxes.mjs";
 import CalendarClock from "lucide/dist/esm/icons/calendar-clock.mjs";
 import ChartColumn from "lucide/dist/esm/icons/chart-column.mjs";
+import CheckMark from "lucide/dist/esm/icons/check.mjs";
 import Check from "lucide/dist/esm/icons/circle-check.mjs";
 import ChevronDown from "lucide/dist/esm/icons/chevron-down.mjs";
 import ChevronLeft from "lucide/dist/esm/icons/chevron-left.mjs";
@@ -81,7 +82,9 @@ export const RENDERER_SETTINGS_ICON_NAMES = [
   "eye-off",
   "unavailable",
   "alert",
+  "arrow-up",
   "check",
+  "check-mark",
   "diagnose",
   "copy",
   "download",
@@ -113,6 +116,12 @@ export const RENDERER_SETTINGS_ICON_NAMES = [
   "puzzle",
   "sliders",
   "sparkles",
+  "category-appearance",
+  "category-interface",
+  "category-workflow",
+  "category-analytics",
+  "category-integrations",
+  "category-tools",
 ] as const;
 
 export type RendererSettingsIconName = (typeof RENDERER_SETTINGS_ICON_NAMES)[number];
@@ -152,7 +161,12 @@ const iconNodes = {
   "eye-off": EyeOff,
   unavailable: CircleOff,
   alert: TriangleAlert,
+  "arrow-up": [
+    ["polyline", { points: "17 11 12 6 7 11" }],
+    ["line", { x1: "12", y1: "6", x2: "12", y2: "18" }],
+  ],
   check: Check,
+  "check-mark": CheckMark,
   diagnose: Stethoscope,
   copy: Copy,
   download: Download,
@@ -184,6 +198,37 @@ const iconNodes = {
   plug: Plug,
   puzzle: Puzzle,
   sparkles: Sparkles,
+  "category-appearance": [
+    ["path", { d: "M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" }],
+    ["path", { d: "M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15z" }],
+  ],
+  "category-interface": [
+    ["rect", { x: "3.5", y: "4.5", width: "17", height: "15", rx: "3" }],
+    ["line", { x1: "9.5", y1: "4.5", x2: "9.5", y2: "19.5" }],
+  ],
+  "category-workflow": [
+    ["circle", { cx: "6.5", cy: "7", r: "2.5" }],
+    ["circle", { cx: "17.5", cy: "7", r: "2.5" }],
+    ["circle", { cx: "17.5", cy: "17", r: "2.5" }],
+    ["path", { d: "M9 7h6" }],
+    ["path", { d: "M6.5 9.5V13a4 4 0 0 0 4 4H15" }],
+  ],
+  "category-analytics": [
+    ["line", { x1: "6.5", y1: "18.5", x2: "6.5", y2: "13" }],
+    ["line", { x1: "12", y1: "18.5", x2: "12", y2: "6.5" }],
+    ["line", { x1: "17.5", y1: "18.5", x2: "17.5", y2: "10.5" }],
+    ["line", { x1: "4", y1: "18.5", x2: "20", y2: "18.5" }],
+  ],
+  "category-integrations": [
+    ["path", { d: "M10 14a4.2 4.2 0 0 0 6 0l2.5-2.5a4.2 4.2 0 0 0-6-6L11 7" }],
+    ["path", { d: "M14 10a4.2 4.2 0 0 0-6 0L5.5 12.5a4.2 4.2 0 0 0 6 6L13 17" }],
+  ],
+  "category-tools": [
+    ["path", { d: "M12 3.5l7.5 4.25v8.5L12 20.5l-7.5-4.25v-8.5L12 3.5z" }],
+    ["path", { d: "M12 12l7.5-4.25" }],
+    ["path", { d: "M12 12v8.5" }],
+    ["path", { d: "M12 12L4.5 7.75" }],
+  ],
 } satisfies Record<RendererSettingsIconName, IconNode>;
 
 export function isRendererSettingsIconName(value: string): value is RendererSettingsIconName {

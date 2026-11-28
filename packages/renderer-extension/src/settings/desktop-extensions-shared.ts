@@ -111,12 +111,12 @@ export interface CreateExtensionIconOptions {
 export const EXTENSION_CATEGORY_ICON_MAP: Readonly<
   Record<DesktopExtensionCategory, RendererSettingsIconName>
 > = Object.freeze({
-  appearance: "palette",
-  interface: "layout-grid",
-  workflow: "zap",
-  analytics: "chart-column",
-  integrations: "plug",
-  tools: "puzzle",
+  appearance: "category-appearance",
+  interface: "category-interface",
+  workflow: "category-workflow",
+  analytics: "category-analytics",
+  integrations: "category-integrations",
+  tools: "category-tools",
 });
 
 export function isValidHostExtensionItem(
@@ -256,7 +256,7 @@ export function createExtensionIconElement(options: CreateExtensionIconOptions):
   } = options;
   const category = resolveExtensionIconCategory(categories);
   const iconName = EXTENSION_CATEGORY_ICON_MAP[category];
-  const glyphSize = size === "detail" ? 24 : size === "row" ? 20 : 19;
+  const glyphSize = size === "detail" ? 26 : 22;
 
   const container = createEl(
     targetDocument,

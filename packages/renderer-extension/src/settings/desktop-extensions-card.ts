@@ -4,12 +4,14 @@ import type {
   DesktopExtensionTrustTier,
 } from "@codexhost/shared-contracts";
 import {
+  EXTENSION_CATEGORY_ICON_MAP,
   contentLocaleMessages,
   createEl,
   createExtensionIconElement,
   formatMessage,
   formatPositiveExtensionCount,
   isWithinElement,
+  resolveExtensionIconCategory,
   statusTone,
   type DesktopExtensionAttentionDetail,
   type DesktopExtensionContentLocale,
@@ -38,7 +40,13 @@ export interface DesktopExtensionCardOptions {
   readonly downloads?: number | undefined;
   readonly trustTier?: DesktopExtensionTrustTier | undefined;
   readonly statusState?: DesktopExtensionStatus["state"] | undefined;
-  readonly update?: { readonly label: string; readonly action: HTMLElement } | undefined;
+  readonly update?:
+    | {
+        readonly version?: string | undefined;
+        readonly label: string;
+        readonly action?: HTMLElement | undefined;
+      }
+    | undefined;
   readonly description?: string | null | undefined;
   readonly attention?: DesktopExtensionAttentionDetail | null | undefined;
   readonly attentionId?: string | undefined;
@@ -171,53 +179,139 @@ export function renderDesktopExtensionCard(options: DesktopExtensionCardOptions)
     titleGroup.append(hint);
   }
 
-  // Single muted dot-separated metadata line: Category · Author · vX.Y.Z · ↓ N
+  // Single muted dot-separated metadata line: [CategoryIcon] Category · Author · vX (→ vY) · ↓ N
   const firstCategory = categories?.[0];
+  const primaryCategoryKey = resolveExtensionIconCategory(categories);
   const primaryCategory = firstCategory
     ? (contentCopy.categories[firstCategory] ?? firstCategory)
     : undefined;
   const trimmedAuthor = author?.trim() || undefined;
   const formattedVersion = formatVersion(version);
+  const formattedUpdateVersion = formatVersion(update?.version);
   const formattedDownloads = formatPositiveExtensionCount(downloads);
 
   const metaParts: string[] = [];
   if (primaryCategory) metaParts.push(primaryCategory);
   if (trimmedAuthor) metaParts.push(trimmedAuthor);
-  if (formattedVersion) metaParts.push(formattedVersion);
+  const versionSummary =
+    formattedVersion && formattedUpdateVersion
+      ? `${formattedVersion} → ${formattedUpdateVersion}`
+      : (formattedVersion ?? (formattedUpdateVersion ? update?.label : undefined));
 
   const downloadsLabel = formattedDownloads
     ? formatMessage(copy.downloadsLabel, { count: formattedDownloads })
     : undefined;
+  const metaTitle = [
+    ...metaParts,
+    ...(versionSummary ? [versionSummary] : []),
+    ...(downloadsLabel ? [downloadsLabel] : []),
+  ].join(" · ");
+
+  const buildCategorySegment = (): HTMLSpanElement | null => {
+    if (!primaryCategory) return null;
+    const segment = createEl(
+      document,
+      "span",
+      "settings-extensions-card__meta-segment settings-extensions-card__meta-category",
+    );
+    const iconSlot = createEl(document, "span", "settings-extensions-card__meta-category-icon");
+    iconSlot.setAttribute("aria-hidden", "true");
+    iconSlot.append(
+      createRendererSettingsIcon(EXTENSION_CATEGORY_ICON_MAP[primaryCategoryKey], 12),
+    );
+    segment.append(iconSlot, createEl(document, "span", "", primaryCategory));
+    return segment;
+  };
+
+  const buildVersionSegment = (): HTMLSpanElement | null => {
+    if (!versionSummary) return null;
+    const segment = createEl(
+      document,
+      "span",
+      formattedUpdateVersion
+        ? "settings-extensions-card__meta-segment settings-extensions-card__meta-version-upgrade"
+        : "settings-extensions-card__meta-segment",
+    );
+    const label = update?.label ?? versionSummary;
+    segment.title = label;
+    segment.setAttribute("aria-label", label);
+    if (formattedVersion) {
+      segment.append(createEl(document, "span", "", formattedVersion));
+    }
+    if (formattedUpdateVersion) {
+      const target = createEl(document, "span", "settings-extensions-card__meta-update-target");
+      const arrow = createEl(document, "span", "settings-extensions-card__meta-update-arrow", "→");
+      arrow.setAttribute("aria-hidden", "true");
+      target.append(arrow, createEl(document, "span", "", formattedUpdateVersion));
+      segment.append(target);
+    }
+    return segment;
+  };
+
+  const buildDownloadsSegment = (): HTMLSpanElement | null => {
+    if (!formattedDownloads) return null;
+    const downloadsBadge = createEl(
+      document,
+      "span",
+      "settings-extensions-card__meta-segment settings-extensions-card__downloads",
+    );
+    downloadsBadge.dataset.metric = "downloads";
+    if (downloadsLabel) {
+      downloadsBadge.title = downloadsLabel;
+      downloadsBadge.setAttribute("aria-label", downloadsLabel);
+    }
+    downloadsBadge.append(
+      createRendererSettingsIcon("download", 11),
+      createEl(document, "span", "", formattedDownloads),
+    );
+    return downloadsBadge;
+  };
 
   let metaLine: HTMLDivElement | null = null;
-  if (metaParts.length > 0 || formattedDownloads) {
-    metaLine = createEl(document, "div", "settings-extensions-card__meta-line");
-    metaLine.title = [...metaParts, ...(downloadsLabel ? [downloadsLabel] : [])].join(" · ");
-    for (const part of metaParts) {
-      metaLine.append(createEl(document, "span", "settings-extensions-card__meta-segment", part));
-    }
-    if (formattedDownloads) {
-      const downloadsBadge = createEl(
-        document,
-        "span",
-        "settings-extensions-card__meta-segment settings-extensions-card__downloads",
-      );
-      downloadsBadge.dataset.metric = "downloads";
-      if (downloadsLabel) {
-        downloadsBadge.title = downloadsLabel;
-        downloadsBadge.setAttribute("aria-label", downloadsLabel);
+  if (isFeatured) {
+    if (primaryCategory || trimmedAuthor || versionSummary || formattedDownloads) {
+      metaLine = createEl(document, "div", "settings-extensions-card__meta-line");
+      metaLine.title = metaTitle;
+      const categoryEl = buildCategorySegment();
+      if (categoryEl) metaLine.append(categoryEl);
+      if (formattedUpdateVersion) {
+        const versionEl = buildVersionSegment();
+        if (versionEl) metaLine.append(versionEl);
+      } else if (trimmedAuthor) {
+        metaLine.append(
+          createEl(document, "span", "settings-extensions-card__meta-segment", trimmedAuthor),
+        );
+      } else {
+        const versionEl = buildVersionSegment();
+        if (versionEl) metaLine.append(versionEl);
       }
-      downloadsBadge.append(
-        createRendererSettingsIcon("download", 11),
-        createEl(document, "span", "", formattedDownloads),
-      );
-      metaLine.append(downloadsBadge);
+      const downloadsEl = buildDownloadsSegment();
+      if (downloadsEl) metaLine.append(downloadsEl);
     }
+  } else if (primaryCategory || trimmedAuthor || versionSummary || formattedDownloads) {
+    metaLine = createEl(document, "div", "settings-extensions-card__meta-line");
+    metaLine.title = metaTitle;
+    const categoryEl = buildCategorySegment();
+    if (categoryEl) metaLine.append(categoryEl);
+    if (trimmedAuthor) {
+      metaLine.append(
+        createEl(document, "span", "settings-extensions-card__meta-segment", trimmedAuthor),
+      );
+    }
+    const versionEl = buildVersionSegment();
+    if (versionEl) metaLine.append(versionEl);
+    const downloadsEl = buildDownloadsSegment();
+    if (downloadsEl) metaLine.append(downloadsEl);
   }
 
   const actionWrap = createEl(document, "div", "settings-extensions-card__action");
   actionWrap.addEventListener("click", stopTrigger);
   actionWrap.addEventListener("keydown", stopTrigger);
+  if (update?.action) {
+    update.action.addEventListener("click", stopTrigger);
+    update.action.addEventListener("keydown", stopTrigger);
+    actionWrap.append(update.action);
+  }
   if (secondaryAction) {
     actionWrap.append(secondaryAction);
   }
@@ -265,11 +359,9 @@ export function renderDesktopExtensionCard(options: DesktopExtensionCardOptions)
 
     const main = createEl(document, "div", "settings-extensions-row__main");
     const rowTop = createEl(document, "div", "settings-extensions-row__top");
-    const textHead = createEl(document, "div", "settings-extensions-row__text-head");
-    textHead.append(titleGroup);
-    if (metaLine) textHead.append(metaLine);
-    rowTop.append(textHead, actionWrap);
+    rowTop.append(titleGroup, actionWrap);
     main.append(rowTop);
+    if (metaLine) main.append(metaLine);
 
     if (trimmedDescription) {
       const descEl = createEl(
@@ -291,21 +383,6 @@ export function renderDesktopExtensionCard(options: DesktopExtensionCardOptions)
         createEl(document, "span", "", attention.text),
       );
       main.append(detail);
-    }
-
-    if (update) {
-      const updateRow = createEl(document, "div", "settings-extensions-card__update");
-      updateRow.dataset.updateAvailable = "true";
-      update.action.addEventListener("click", stopTrigger);
-      update.action.addEventListener("keydown", stopTrigger);
-      const label = createEl(
-        document,
-        "span",
-        "settings-extensions-card__update-label",
-        update.label,
-      );
-      updateRow.append(label, update.action);
-      main.append(updateRow);
     }
 
     card.append(iconWrap, main);

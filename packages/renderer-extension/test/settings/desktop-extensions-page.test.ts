@@ -449,26 +449,38 @@ describe("Unified Host extensions settings page", () => {
       {
         categories: ["appearance"] as const,
         expectedCategory: "appearance",
-        expectedIcon: "palette",
+        expectedIcon: "category-appearance",
       },
       {
         categories: ["interface"] as const,
         expectedCategory: "interface",
-        expectedIcon: "layout-grid",
+        expectedIcon: "category-interface",
       },
-      { categories: ["workflow"] as const, expectedCategory: "workflow", expectedIcon: "zap" },
+      {
+        categories: ["workflow"] as const,
+        expectedCategory: "workflow",
+        expectedIcon: "category-workflow",
+      },
       {
         categories: ["analytics"] as const,
         expectedCategory: "analytics",
-        expectedIcon: "chart-column",
+        expectedIcon: "category-analytics",
       },
       {
         categories: ["integrations"] as const,
         expectedCategory: "integrations",
-        expectedIcon: "plug",
+        expectedIcon: "category-integrations",
       },
-      { categories: ["tools"] as const, expectedCategory: "tools", expectedIcon: "puzzle" },
-      { categories: undefined, expectedCategory: "tools", expectedIcon: "puzzle" },
+      {
+        categories: ["tools"] as const,
+        expectedCategory: "tools",
+        expectedIcon: "category-tools",
+      },
+      {
+        categories: undefined,
+        expectedCategory: "tools",
+        expectedIcon: "category-tools",
+      },
     ];
     for (const testCase of categoryCases) {
       const cardIcon = createExtensionIconElement({
@@ -839,13 +851,21 @@ describe("Unified Host extensions settings page", () => {
     await vi.waitFor(() =>
       expect(installedTab.getAttribute("aria-description")).toBe("有插件可更新"),
     );
-    expect(textOf(treeCard())).toContain("可更新 v0.2.0");
+    expect(textOf(treeCard())).toContain("v0.1.0");
+    expect(textOf(treeCard())).toContain("→");
+    expect(textOf(treeCard())).toContain("v0.2.0");
+    const upgradeSegment = must(
+      descendants(treeCard()).find((el) =>
+        el.className.includes("settings-extensions-card__meta-version-upgrade"),
+      ),
+    );
+    expect(upgradeSegment.getAttribute("aria-label")).toBe("可更新 v0.2.0");
     const button = must(updateButton());
     expect(textOf(button)).toBe("更新");
     const pageButton = must(
       descendants(treeCard()).find((el) => el.dataset.action === "open-page"),
     );
-    expect(button.parent).not.toBe(pageButton.parent);
+    expect(button.parent).toBe(pageButton.parent);
     expect(button.dispatch("keydown", { key: "Enter" }).stopped).toBe(true);
     button.dispatchBubbling("click");
     expect(elements().some((el) => el.tagName === "dialog" && el.open)).toBe(false);

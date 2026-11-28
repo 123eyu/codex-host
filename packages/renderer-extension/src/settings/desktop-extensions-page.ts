@@ -921,23 +921,34 @@ export function createDesktopExtensionsSettingsPage(
           openPageButton = btn;
         }
 
-        let update: { label: string; action: HTMLButtonElement } | undefined;
+        let update:
+          | { readonly version: string; readonly label: string; readonly action: HTMLButtonElement }
+          | undefined;
         if (catalogEntry && hasCatalogUpdate(item, catalogEntry)) {
           const updating = extAction === "update";
           const button = createEl(
             document,
             "button",
-            "settings-command-button settings-extensions-card__button settings-extensions-card__update-button",
-            updating ? copy.updating : copy.update,
+            "settings-extensions-btn-update settings-extensions-btn-update--inline",
           );
           button.type = "button";
           button.dataset.action = "update";
+          button.title = formatMessage(copy.updateToVersion, {
+            version: catalogEntry.version.replace(/^v/u, ""),
+          });
           button.setAttribute("aria-busy", String(updating));
           button.disabled = controlsDisabled || !canUpdate;
-          button.addEventListener("click", () => {
+          if (!updating) {
+            button.append(createRendererSettingsIcon("arrow-up", 11));
+          }
+          button.append(createEl(document, "span", "", updating ? copy.updating : copy.update));
+          button.addEventListener("click", (event) => {
+            event.stopPropagation?.();
             if (!button.disabled) void installFromCatalog(catalogEntry, true);
           });
+          button.addEventListener("keydown", stopTrigger);
           update = {
+            version: catalogEntry.version,
             label: formatMessage(copy.updateVersionCue, {
               version: catalogEntry.version.replace(/^v/u, ""),
             }),
@@ -981,7 +992,9 @@ export function createDesktopExtensionsSettingsPage(
           description: extensionDescription(item, contentLocale),
           attention,
           attentionId: attention ? errorId : undefined,
-          categories: item.state === "valid" ? item.manifest.categories : undefined,
+          categories:
+            (item.state === "valid" ? item.manifest.categories : undefined) ??
+            catalogEntry?.categories,
           platformBadge: webOnly ? derivePlatformBadge(targets, copy) : null,
           incompatiblePlatformLabel: webOnly ? copy.platformWebOnlyShort : undefined,
           capabilityBadges: [],

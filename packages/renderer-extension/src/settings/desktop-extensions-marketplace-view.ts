@@ -15,6 +15,7 @@ import {
   contentLocaleMessages,
   createEl,
   derivePlatformBadge,
+  formatMessage,
   hasCatalogUpdate,
   parseSafeExtensionIconUrl,
   selectFeaturedCatalogEntries,
@@ -128,16 +129,29 @@ export function renderDesktopExtensionsMarketplaceGrid(
       actionButton.className = "settings-extensions-btn-update";
       actionButton.dataset.action = "update";
       const updatingThis = entryAction === "update";
-      actionButton.textContent = updatingThis ? copy.updating : copy.update;
+      actionButton.title = formatMessage(copy.updateToVersion, {
+        version: entry.version.replace(/^v/u, ""),
+      });
+      if (!updatingThis) {
+        actionButton.append(createRendererSettingsIcon("arrow-up", 11));
+      }
+      actionButton.append(
+        createEl(document, "span", "", updatingThis ? copy.updating : copy.update),
+      );
       actionButton.setAttribute("aria-busy", String(updatingThis));
       actionButton.disabled = controlsDisabled || !canInstall;
     } else {
-      actionButton.className = "settings-extensions-btn-installed";
+      const isFeaturedLayout = layout === "featured";
+      actionButton.className = isFeaturedLayout
+        ? "settings-extensions-btn-installed settings-extensions-btn-installed--featured"
+        : "settings-extensions-btn-installed";
       actionButton.dataset.action = "installed";
-      actionButton.append(
-        createRendererSettingsIcon("check", 12),
-        createEl(document, "span", "", copy.installedBadge),
-      );
+      actionButton.title = copy.installedBadge;
+      actionButton.setAttribute("aria-label", copy.installedBadge);
+      actionButton.append(createRendererSettingsIcon("check-mark", 13));
+      if (!isFeaturedLayout) {
+        actionButton.append(createEl(document, "span", "", copy.installedBadge));
+      }
       actionButton.disabled = controlsDisabled;
     }
 
@@ -182,9 +196,21 @@ export function renderDesktopExtensionsMarketplaceGrid(
       resolveIconUrl:
         shouldLoadViaRpc && catalogIconLoader ? () => catalogIconLoader.load(entry) : undefined,
       author: entry.author,
-      version: entry.version,
+      version:
+        updateAvailable && installed?.state === "valid"
+          ? installed.manifest.version
+          : entry.version,
       downloads: entry.downloads,
       trustTier: entry.trustTier,
+      update:
+        updateAvailable && installed?.state === "valid"
+          ? {
+              version: entry.version,
+              label: formatMessage(copy.updateVersionCue, {
+                version: entry.version.replace(/^v/u, ""),
+              }),
+            }
+          : undefined,
       description: catalogDescription(entry, contentLocale),
       categories: entry.categories,
       platformBadge: webOnly ? derivePlatformBadge(entry.targets, copy) : null,
