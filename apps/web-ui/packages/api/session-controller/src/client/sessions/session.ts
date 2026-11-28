@@ -738,7 +738,11 @@ export class Session implements SessionFace {
     return this.snapshotCache;
   }
 
-  /** Approximate in-memory footprint of this Session's event window, tool outputs, and projections. */
+  /**
+   * Approximate raw Session-layer in-memory footprint (event window including transient live
+   * chunks, staged assistant settlements, tool outputs, and projections). Downstream
+   * `UiConversation` assembly overhead is accounted for by callers such as `SessionKeepalive`.
+   */
   estimatedBytes(): number {
     const projectionRevision = this.projections.revision;
     if (this.cachedProjectionBytesRevision !== projectionRevision) {
@@ -749,7 +753,12 @@ export class Session implements SessionFace {
       this.eventSource.estimatedBytes > 0
         ? this.eventSource.estimatedBytes
         : estimateJournalBytes(this.cachedJournal);
-    return eventBytes + this.toolOutputs.estimatedBytes + this.cachedProjectionBytes;
+    return (
+      eventBytes +
+      this.assistantStream.estimatedPendingBytes() +
+      this.toolOutputs.estimatedBytes +
+      this.cachedProjectionBytes
+    );
   }
 
   /** Capture only display data before releasing the runtime and its transport. */
@@ -939,9 +948,18 @@ export class Session implements SessionFace {
         break;
       case "projection":
         this.projections.applyLive(change.key, change.value, SessionSeq(change.seq));
+        if (change.key === "subagent" && this.address?.mode === "unknown") {
+          this.notifier.markDirty();
+        }
+        break;
     }
+    const previousSyncedAt = this.lastSyncedAt;
     this.lastSyncedAt = Date.now();
-    this.notifier.markFrameDirty();
+    // Assistant stream frames carry live body deltas consumed via `eventSource`, not
+    // `SessionSnapshot` fields; avoid per-chunk snapshot rebuilds once synced.
+    if (change.type !== "assistant-stream" || previousSyncedAt === undefined) {
+      this.notifier.markFrameDirty();
+    }
   }
 
   /** Replace the complete contiguous window and apply page-owned projection metadata. */
@@ -996,22 +1014,19 @@ export class Session implements SessionFace {
     if (result?.type === "settlement") {
       this.eventSource.settleAssistant(result.attemptId, result.entry);
       this.observeSubmissionEvent(result.entry.event);
-      this.notifier.markDirty();
       return;
     }
     if (result?.type === "abandonment") {
       this.eventSource.settleAssistant(result.attemptId);
-      this.notifier.markDirty();
       return;
     }
     if (result?.type === "publish") {
       const changed = this.appendLive(result.entry);
       if (result.retireAttemptId !== undefined)
         this.eventSource.settleAssistant(result.retireAttemptId);
-      if (changed || result.retireAttemptId !== undefined) this.notifier.markDirty();
+      if (changed) this.notifier.markDirty();
     } else if (result?.type === "transient") {
       this.eventSource.append(result.entry);
-      this.notifier.markDirty();
     }
   }
 
@@ -1025,9 +1040,11 @@ export class Session implements SessionFace {
       pending.pages.push(entries);
       return;
     }
+    const previousHasMore = this.hasMore;
     this.baseSeq = entries[0] === undefined ? this.baseSeq : SessionLogOffset(entries[0].event.seq);
     this.hasMore = hasMore;
     this.eventSource.prepend(entries, hasMore);
+    if (previousHasMore !== hasMore) this.notifier.markDirty();
     for (const { event } of entries) {
       if (event.type === "user/message") this.observeSubmissionMessage(event.data, true);
       else if (event.type === "agent/inbox/spliced") {

@@ -2,7 +2,7 @@ import type { AttachmentId, ImageAttachmentRef } from "@deepseek-ai/dsh-attachme
 import { WEB_ACTIVE_TURN_PROJECTION } from "@codexhost/shared-contracts";
 import { SessionId, SessionSeq } from "@deepseek-ai/dsh-session/types";
 import { RemoteError } from "@deepseek-ai/dsh-typert-protocol";
-import { MessageId } from "@deepseek-ai/dsh-llm/brand";
+import { LlmAttemptId, MessageId } from "@deepseek-ai/dsh-llm/brand";
 import { expect, it, vi } from "vitest";
 import { TYPERT_REMOTE } from "../generated/remote.js";
 import { ProjectionValueStore } from "../src/client/sessions/projection-store.ts";
@@ -320,5 +320,149 @@ it("fires onObserved synchronously on durable user/message before the echo retir
     releaseStream();
     await session.dispose();
     globalThis.requestAnimationFrame = originalRaf;
+  }
+});
+
+it("does not notify SessionSnapshot subscribers on assistant live-chunk frames while tracking transient bytes", async () => {
+  const queue: unknown[] = [];
+  let wake: (() => void) | undefined;
+  let closed = false;
+  const push = (frame: unknown) => {
+    queue.push(frame);
+    wake?.();
+    wake = undefined;
+  };
+
+  const makeStream = <Frame>(open: (signal: AbortSignal) => AsyncIterable<Frame>) => {
+    const controller = new AbortController();
+    return {
+      async *[Symbol.asyncIterator]() {
+        for await (const value of open(controller.signal)) {
+          yield { value, generation: 1, accept: () => {} };
+        }
+      },
+      dispose: vi.fn(async () => {
+        closed = true;
+        wake?.();
+        controller.abort();
+      }),
+    };
+  };
+
+  const session = new Session(sessionId, {
+    $stream: ({ open }: { open: (signal: AbortSignal) => AsyncIterable<unknown> }) =>
+      makeStream(open),
+    session: {
+      prompt: vi.fn().mockResolvedValue({ ok: true, value: { accepted: true } }),
+      follow: async function* (_req: unknown, signal: AbortSignal) {
+        yield {
+          type: "snapshot",
+          epoch: "ep-1",
+          cursor: 1,
+          records: [
+            {
+              type: "event",
+              event: { type: "turn/start", seq: SessionSeq(0), time: 1, data: { turn: 1 } },
+            },
+            {
+              type: "event",
+              event: {
+                type: "step/start",
+                seq: SessionSeq(1),
+                time: 2,
+                data: { turn: 1, step: 1 },
+              },
+            },
+          ],
+          hasMore: false,
+          assistantStream: { revision: 0, blocks: [] },
+        };
+        while (!closed && !signal.aborted) {
+          if (queue.length === 0) {
+            await new Promise<void>((resolve) => {
+              wake = resolve;
+              signal.addEventListener("abort", () => resolve(), { once: true });
+            });
+            continue;
+          }
+          yield queue.shift();
+        }
+      },
+    },
+  } as unknown as SessionRemotes);
+
+  try {
+    await session.open();
+    // Flush any post-open microtask notifications before subscribing to measure chunk churn.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const listener = vi.fn();
+    const unsubscribe = session.subscribe(listener);
+    const snapshotBefore = session.getSnapshot();
+    const bytesBefore = session.estimatedBytes();
+    const attemptId = LlmAttemptId("attempt-1");
+
+    push({
+      type: "assistant-stream",
+      frame: {
+        type: "start",
+        revision: 1,
+        attemptId,
+        startedAfterSeq: SessionSeq(1),
+        turn: 1,
+        step: 1,
+      },
+    });
+    for (let index = 0; index < 20; index += 1) {
+      push({
+        type: "assistant-stream",
+        frame: {
+          type: "chunk",
+          revision: index + 2,
+          attemptId,
+          index,
+          time: 10 + index,
+          chunk: { type: "text-delta", index: 0, text: "x".repeat(128) },
+        },
+      });
+    }
+
+    await vi.waitFor(() => {
+      expect(session.eventSource.getSnapshot().entries).toHaveLength(22);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Zero SessionSnapshot rebuilds or subscriber notifications for live chunks.
+    expect(listener).not.toHaveBeenCalled();
+    expect(session.getSnapshot()).toBe(snapshotBefore);
+    expect(session.estimatedBytes()).toBeGreaterThan(bytesBefore + 4_000);
+
+    // Abandonment retires transient rows and releases their estimated bytes without snapshot churn.
+    push({
+      type: "assistant-stream",
+      frame: {
+        type: "end",
+        revision: 22,
+        attemptId,
+        index: 20,
+        outcome: { kind: "abandoned" },
+      },
+    });
+    await vi.waitFor(() => {
+      expect(session.eventSource.getSnapshot().entries).toHaveLength(2);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(listener).not.toHaveBeenCalled();
+    expect(session.estimatedBytes()).toBe(bytesBefore);
+
+    // Real snapshot-visible changes (running, errors) still notify subscribers immediately.
+    session.handleRunning(true);
+    await vi.waitFor(() => {
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+    expect(session.getSnapshot().running).toBe(true);
+    unsubscribe();
+  } finally {
+    await session.dispose();
   }
 });

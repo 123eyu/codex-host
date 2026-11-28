@@ -19,12 +19,27 @@ declare module "@deepseek-ai/dsh-api-session-controller/client" {
 /** Maximum stopped warm sessions kept retained in the background. */
 export const MAX_STOPPED_WARM_SESSIONS = 4;
 
-/** Maximum estimated byte budget across stopped warm sessions (32 MiB). */
+/** Maximum estimated effective byte budget across stopped warm sessions (32 MiB). */
 export const MAX_STOPPED_WARM_BYTES = 32 * 1024 * 1024;
+
+/** Maximum non-viewed background running sessions kept retained warm. */
+export const MAX_BACKGROUND_RUNNING_SESSIONS = 2;
+
+/** Maximum estimated effective byte budget across all warm sessions (48 MiB). */
+export const MAX_TOTAL_WARM_BYTES = 48 * 1024 * 1024;
+
+/**
+ * Multiplier applied to raw `Session.estimatedBytes()` to account for downstream
+ * `UiConversation` assembly overhead (contexts, view builders, slices, groups).
+ */
+export const WARM_SESSION_ASSEMBLY_OVERHEAD_FACTOR = 3;
 
 export interface SessionKeepaliveOptions {
   readonly maxStoppedSessions?: number;
   readonly maxStoppedBytes?: number;
+  readonly maxBackgroundRunningSessions?: number;
+  readonly maxTotalBytes?: number;
+  readonly assemblyOverheadFactor?: number;
 }
 
 interface HeldSession {
@@ -32,7 +47,7 @@ interface HeldSession {
   readonly binding: SessionBinding;
 }
 
-/** One background reference per running catalog Session or bounded recent visit/completion. */
+/** Bounded background warm retention for recently visited Sessions. */
 export class SessionKeepalive {
   private readonly held = new Map<SessionId, HeldSession>();
   private readonly recent = new Map<SessionId, SessionTarget>();
@@ -41,6 +56,9 @@ export class SessionKeepalive {
   private readonly failed = new Set<SessionId>();
   private readonly maxStoppedSessions: number;
   private readonly maxStoppedBytes: number;
+  private readonly maxBackgroundRunningSessions: number;
+  private readonly maxTotalBytes: number;
+  private readonly assemblyOverheadFactor: number;
   private lastVisited: SessionId | undefined;
   private active = false;
   private reconciling = false;
@@ -53,6 +71,18 @@ export class SessionKeepalive {
   ) {
     this.maxStoppedSessions = Math.max(0, options.maxStoppedSessions ?? MAX_STOPPED_WARM_SESSIONS);
     this.maxStoppedBytes = Math.max(0, options.maxStoppedBytes ?? MAX_STOPPED_WARM_BYTES);
+    this.maxBackgroundRunningSessions = Math.max(
+      0,
+      options.maxBackgroundRunningSessions ?? MAX_BACKGROUND_RUNNING_SESSIONS,
+    );
+    this.maxTotalBytes =
+      options.maxTotalBytes === undefined
+        ? Math.max(this.maxStoppedBytes, MAX_TOTAL_WARM_BYTES)
+        : Math.max(0, options.maxTotalBytes);
+    this.assemblyOverheadFactor = Math.max(
+      1,
+      options.assemblyOverheadFactor ?? WARM_SESSION_ASSEMBLY_OVERHEAD_FACTOR,
+    );
   }
 
   start(): () => void {
@@ -134,28 +164,7 @@ export class SessionKeepalive {
   private update(): void {
     const list = this.sessions.list.getSnapshot();
     const catalog = new Set(list.ids);
-    const summaryOnly = new Set(list.summaryOnlyIds ?? []);
     const archived = new Set(this.workspaces.list.getSnapshot().archivedSessionIds);
-    const running = new Set<SessionId>();
-    for (const id of list.ids) {
-      const row = list.byId[id];
-      // Child catalogs and metadata-only lookups do not discover new history subscriptions.
-      if (
-        row?.running &&
-        row.origin !== "subagent" &&
-        !archived.has(id) &&
-        (!summaryOnly.has(id) || this.recent.has(id))
-      )
-        running.add(id);
-    }
-    if (list.phase === "pending") {
-      for (const id of this.running) if (!archived.has(id)) running.add(id);
-    } else {
-      for (const id of this.running) {
-        if (!running.has(id) && catalog.has(id) && !archived.has(id)) this.remember(id, id);
-      }
-    }
-    this.running = running;
 
     for (const [id, target] of this.recent) {
       if (
@@ -164,28 +173,86 @@ export class SessionKeepalive {
         (list.phase === "ready" && !catalog.has(id) && typeof target === "string")
       ) {
         this.recent.delete(id);
+        this.running.delete(id);
         if (this.lastVisited === id) this.lastVisited = undefined;
       }
     }
-    // Running Sessions never consume stopped warm slots or byte budget, including the main view.
+
+    // Only recently visited Sessions enter warm retention; sidebar indicators, completion
+    // badges, desktop notifications, and pending interactions do not need full transcripts.
+    const running = new Set<SessionId>();
+    for (const id of this.recent.keys()) {
+      const row = list.byId[id];
+      if (row?.running && row.origin !== "subagent") {
+        running.add(id);
+      } else if (list.phase === "pending" && this.running.has(id)) {
+        running.add(id);
+      }
+    }
+    this.running = running;
+
+    const protectedIds = new Set<SessionId>();
+    const effectiveBytesById = new Map<SessionId, number>();
+    let totalBytes = 0;
+    for (const id of this.recent.keys()) {
+      if (this.isProtectedView(id, list)) protectedIds.add(id);
+      const rawBytes = Math.max(0, this.sessions.estimatedBytes?.(id) ?? 0);
+      const effectiveBytes = rawBytes * this.assemblyOverheadFactor;
+      effectiveBytesById.set(id, effectiveBytes);
+      totalBytes += effectiveBytes;
+    }
+
     const stopped = [...this.recent.keys()].filter((id) => !running.has(id));
     let stoppedCount = stopped.length;
     let stoppedBytes = 0;
-    const bytesById = new Map<SessionId, number>();
-    for (const id of stopped) {
-      const bytes = Math.max(0, this.sessions.estimatedBytes?.(id) ?? 0);
-      bytesById.set(id, bytes);
-      stoppedBytes += bytes;
-    }
+    for (const id of stopped) stoppedBytes += effectiveBytesById.get(id) ?? 0;
+
     for (const id of stopped) {
       if (stoppedCount <= this.maxStoppedSessions && stoppedBytes <= this.maxStoppedBytes) break;
-      if (this.isProtectedView(id, list)) continue;
+      if (protectedIds.has(id)) continue;
+      const bytes = effectiveBytesById.get(id) ?? 0;
       this.recent.delete(id);
       stoppedCount -= 1;
-      stoppedBytes -= bytesById.get(id) ?? 0;
+      stoppedBytes -= bytes;
+      totalBytes -= bytes;
     }
+
+    const backgroundRunning = [...this.recent.keys()].filter(
+      (id) => running.has(id) && !protectedIds.has(id),
+    );
+    let backgroundRunningCount = backgroundRunning.length;
+    for (const id of backgroundRunning) {
+      if (backgroundRunningCount <= this.maxBackgroundRunningSessions) break;
+      const bytes = effectiveBytesById.get(id) ?? 0;
+      this.recent.delete(id);
+      running.delete(id);
+      backgroundRunningCount -= 1;
+      totalBytes -= bytes;
+    }
+
+    if (totalBytes > this.maxTotalBytes) {
+      const remainingStopped = [...this.recent.keys()].filter(
+        (id) => !running.has(id) && !protectedIds.has(id),
+      );
+      for (const id of remainingStopped) {
+        if (totalBytes <= this.maxTotalBytes) break;
+        this.recent.delete(id);
+        totalBytes -= effectiveBytesById.get(id) ?? 0;
+      }
+    }
+    if (totalBytes > this.maxTotalBytes) {
+      const remainingBackgroundRunning = [...this.recent.keys()].filter(
+        (id) => running.has(id) && !protectedIds.has(id),
+      );
+      for (const id of remainingBackgroundRunning) {
+        if (totalBytes <= this.maxTotalBytes) break;
+        this.recent.delete(id);
+        running.delete(id);
+        totalBytes -= effectiveBytesById.get(id) ?? 0;
+      }
+    }
+
     const targets = new Map(this.recent);
-    for (const id of running) targets.set(id, id);
     for (const id of this.failed) if (!targets.has(id)) this.failed.delete(id);
 
     for (const [id, held] of this.held) {

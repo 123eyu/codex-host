@@ -175,6 +175,7 @@ export interface RemotePeerProvider {
   nodeIdForHostId?(hostId: string): string | undefined;
   waitForInitialConnection?(hostId: string): Promise<void>;
   onThreadChanged?: (hostId: string, threadId: string) => unknown;
+  onThreadInteraction?: (hostId: string, threadId: string) => unknown;
   onThreadConfigurationChanged?: (hostId: string, threadId: string) => void;
   onUsageChanged?: (hostId: string, threadId: string) => void;
   onCatalogInspectionChanged?: (hostId: string) => void;
@@ -238,6 +239,11 @@ export class RemoteSessions {
     string,
     { realtime: NonNullable<PeerThreadSource["host"]["realtime"]>; interactions: ChInteractions }
   >();
+  private readonly peerInteractionReads = new Map<
+    string,
+    { dirty: boolean; promise: Promise<void> }
+  >();
+  private readonly syncedPeerRunningInteractions = new Map<string, Set<string>>();
   private readonly followLifetime = new AbortController();
   /** When a periodic check first found each view without a follower. */
   private readonly unfollowedSince = new WeakMap<ChThreadView, number>();
@@ -254,6 +260,7 @@ export class RemoteSessions {
   private readonly idleViewTimer: NodeJS.Timeout;
   private readonly peerHandlers: {
     onThreadChanged: (hostId: string, threadId: string) => Promise<void>;
+    onThreadInteraction: (hostId: string, threadId: string) => Promise<void>;
     onThreadConfigurationChanged: (hostId: string, threadId: string) => void;
     onUsageChanged: (hostId: string, threadId: string) => void;
     onCatalogInspectionChanged: (hostId: string) => void;
@@ -279,6 +286,8 @@ export class RemoteSessions {
   ) {
     this.peerHandlers = {
       onThreadChanged: (hostId, threadId) => this.handlePeerThreadChanged(hostId, threadId),
+      onThreadInteraction: (hostId, threadId) =>
+        this.handlePeerInteractionChanged(hostId, threadId),
       onThreadConfigurationChanged: (hostId, threadId) =>
         this.handlePeerConfigurationChanged(hostId, threadId),
       onUsageChanged: (hostId, threadId) => this.handlePeerUsageChanged(hostId, threadId),
@@ -289,6 +298,7 @@ export class RemoteSessions {
     };
     if (peers) {
       peers.onThreadChanged ??= this.peerHandlers.onThreadChanged;
+      peers.onThreadInteraction ??= this.peerHandlers.onThreadInteraction;
       peers.onThreadConfigurationChanged ??= this.peerHandlers.onThreadConfigurationChanged;
       peers.onUsageChanged ??= this.peerHandlers.onUsageChanged;
       peers.onCatalogInspectionChanged ??= this.peerHandlers.onCatalogInspectionChanged;
@@ -337,6 +347,60 @@ export class RemoteSessions {
       throw error;
     }
   }
+  /** Reconcile pending interactions for an unwatched Peer Thread via a bounded snapshot without reading full history. */
+  private handlePeerInteractionChanged(hostId: string, threadId: string): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    const source = this.peers?.source(hostId);
+    if (!source) return Promise.resolve();
+    const id = remoteSessionId(hostId, threadId);
+    const active = this.peerInteractionReads.get(id);
+    if (active) {
+      active.dirty = true;
+      return active.promise;
+    }
+    const state = { dirty: true, promise: Promise.resolve() };
+    state.promise = (async () => {
+      try {
+        while (state.dirty && !this.closed) {
+          state.dirty = false;
+          const currentSource = this.peers?.source(hostId);
+          if (!currentSource) return;
+          const host = this.hosts.get(hostId);
+          if (host && !host.online) return;
+          const startResetRevision = this.peerResetRevisions.get(hostId) ?? 0;
+          const entry = this.entries.get(id);
+          if (entry && !entry.online) return;
+          const expectedEpoch = entry?.epoch ?? host?.epoch;
+          let snapshot;
+          try {
+            snapshot = await currentSource.host.realtime.snapshot(threadId, {
+              truncateToolOutput: true,
+            });
+          } catch {
+            return;
+          }
+          if (
+            this.closed ||
+            this.peers?.source(hostId) !== currentSource ||
+            (this.peerResetRevisions.get(hostId) ?? 0) !== startResetRevision ||
+            this.hosts.get(hostId)?.online === false
+          ) {
+            return;
+          }
+          const latestEntry = this.entries.get(id);
+          if (latestEntry && !latestEntry.online) return;
+          if (expectedEpoch && snapshot.cursor.epoch !== expectedEpoch) return;
+          this.interactionsForPeer(hostId, currentSource).update(snapshot, id);
+        }
+      } finally {
+        if (this.peerInteractionReads.get(id) === state) {
+          this.peerInteractionReads.delete(id);
+        }
+      }
+    })();
+    this.peerInteractionReads.set(id, state);
+    return state.promise;
+  }
   private handlePeerConfigurationChanged(hostId: string, threadId: string): void {
     if (this.closed) return;
     const entry = this.entries.get(remoteSessionId(hostId, threadId));
@@ -380,6 +444,7 @@ export class RemoteSessions {
     this.syncedPeerSources.delete(hostId);
     this.peerTreeRetryAttempts.delete(hostId);
     this.clearPeerChangeTimer(hostId);
+    this.syncedPeerRunningInteractions.delete(hostId);
     this.clearPeerInteractions(hostId);
     const host = this.hosts.get(hostId);
     if (host) host.online = false;
@@ -417,6 +482,7 @@ export class RemoteSessions {
       }
     }
     if (full || epochChanged) {
+      this.syncedPeerRunningInteractions.delete(hostId);
       this.clearPeerInteractions(hostId);
       for (const entry of this.entries.values()) {
         if (entry.identity.hostId === hostId) {
@@ -1427,6 +1493,25 @@ export class RemoteSessions {
         if (summaryChanged) {
           this.events.emit("api-session/added", nextSummary);
         }
+        let synced = this.syncedPeerRunningInteractions.get(host.hostId);
+        if (current.row.status.type === "active" && !current.archived) {
+          if (!current.view && !synced?.has(current.identity.threadId)) {
+            if (!synced) {
+              synced = new Set<string>();
+              this.syncedPeerRunningInteractions.set(host.hostId, synced);
+            }
+            synced.add(current.identity.threadId);
+            void this.handlePeerInteractionChanged(host.hostId, current.identity.threadId);
+          }
+        } else {
+          synced?.delete(current.identity.threadId);
+          if (
+            !current.view &&
+            this.peerInteractions.get(host.hostId)?.interactions.hasPending(id)
+          ) {
+            void this.handlePeerInteractionChanged(host.hostId, current.identity.threadId);
+          }
+        }
       }
       if (pinRevision === this.pinRevision) {
         this.peerPinnedIds.set(host.hostId, [...listed.pinnedIds]);
@@ -2317,6 +2402,12 @@ export class RemoteSessions {
           (this.peerResetRevisions.get(current.identity.hostId) ?? 0) === startResetRevision
         ) {
           this.interactionsForPeer(current.identity.hostId, source).update(snapshot, id);
+          let synced = this.syncedPeerRunningInteractions.get(current.identity.hostId);
+          if (!synced) {
+            synced = new Set<string>();
+            this.syncedPeerRunningInteractions.set(current.identity.hostId, synced);
+          }
+          synced.add(current.identity.threadId);
         }
         if (JSON.stringify(summary) !== before) this.events.emit("api-session/added", summary);
         this.events.emit("api-session/status", id, summary.running);
@@ -3567,6 +3658,8 @@ export class RemoteSessions {
     if (this.peers) {
       if (this.peers.onThreadChanged === this.peerHandlers.onThreadChanged)
         delete this.peers.onThreadChanged;
+      if (this.peers.onThreadInteraction === this.peerHandlers.onThreadInteraction)
+        delete this.peers.onThreadInteraction;
       if (
         this.peers.onThreadConfigurationChanged === this.peerHandlers.onThreadConfigurationChanged
       )
@@ -3584,6 +3677,8 @@ export class RemoteSessions {
     for (const id of this.entries.keys()) this.clearPending(id);
     for (const peer of this.peerInteractions.values()) peer.interactions.clear();
     this.peerInteractions.clear();
+    this.peerInteractionReads.clear();
+    this.syncedPeerRunningInteractions.clear();
     for (const entry of this.entries.values()) entry.view?.log.reconnectFollowers();
     this.peerArchivedIds.clear();
     this.peerPinnedIds.clear();

@@ -11,6 +11,7 @@ import type {
   SessionLiveEventEntry,
   SessionTransientEventEntry,
 } from "../contract/events.ts";
+import { estimateEventEntryBytes } from "../memory-budget.ts";
 
 interface ActiveAttempt {
   readonly attemptId: LlmAttemptId;
@@ -47,6 +48,16 @@ export class ClientAssistantStream {
   private durableCursor = -1;
   private transientInGap = 0;
   private transientOrder = 0;
+
+  /** Approximate heap footprint of staged durable settlements awaiting stream end. */
+  estimatedPendingBytes(): number {
+    if (this.pending.size === 0) return 0;
+    let total = 0;
+    for (const entry of this.pending.values()) {
+      total += 8 + estimateEventEntryBytes(entry);
+    }
+    return total;
+  }
 
   /**
    * Replace the durable Web window and adopt an optional reconnect baseline.
