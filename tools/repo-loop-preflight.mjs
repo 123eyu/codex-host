@@ -6,11 +6,17 @@ import path from "node:path";
 
 const DEFAULT_COOLDOWN_MINUTES = 10;
 const DEFAULT_STALE_DAYS = 7;
+const DEFAULT_RELEASE_THRESHOLD = 6;
 const MS_PER_DAY = 86_400_000;
 const DEFAULT_STATE_PATH = path.resolve(".codexhost/loop/state.json");
 
 const SKIP_LABELS = new Set(["暂缓", "on-hold", "automation:ignore"]);
 const MAINTAINER_LOGINS = new Set(["iruriQ", "BytePioneer-AI"]);
+
+const RUST_PATH_PATTERN = /\.rs$|^Cargo\.(toml|lock)$|^crates\/|^apps\/desktop-shell\/src-tauri\//;
+const INTERNAL_COMMIT_SCOPE_PATTERN = /^(automation|ci|release|repo-loop|docs|tests?|skills?)$/i;
+const USER_FACING_COMMIT_PATTERN = /^(feat|fix|perf|revert)(?:\(([^)]+)\))?:/i;
+const USER_FACING_STYLE_PATTERN = /^style\((ui|web-ui|desktop-shell|renderer-extension|icons)\):/i;
 
 const UI_PATH_PATTERNS = [
   /^apps\/web-ui\//,
@@ -42,6 +48,7 @@ function parseArgs(argv) {
   const args = {
     cooldownMinutes: DEFAULT_COOLDOWN_MINUTES,
     staleDays: DEFAULT_STALE_DAYS,
+    releaseThreshold: DEFAULT_RELEASE_THRESHOLD,
     statePath: DEFAULT_STATE_PATH,
     exitCode: false,
     includeIssues: true,
@@ -66,6 +73,8 @@ function parseArgs(argv) {
       args.cooldownMinutes = Number(argv[++i]);
     } else if (token === "--stale-days") {
       args.staleDays = Number(argv[++i]);
+    } else if (token === "--release-threshold") {
+      args.releaseThreshold = Number(argv[++i]);
     } else if (token === "--state-path") {
       args.statePath = path.resolve(argv[++i]);
     } else if (token === "--mark-pr") {
@@ -93,7 +102,7 @@ function parseArgs(argv) {
 
 function printUsage() {
   console.log(`Usage:
-  node tools/repo-loop-preflight.mjs [--cooldown-minutes 10] [--stale-days 7] [--no-issues] [--exit-code]
+  node tools/repo-loop-preflight.mjs [--cooldown-minutes 10] [--stale-days 7] [--release-threshold 6] [--no-issues] [--exit-code]
   node tools/repo-loop-preflight.mjs --mark-pr <num> --sha <oid> --status <status> [--round-inc] [--note <text>]
   node tools/repo-loop-preflight.mjs --mark-issue <num> --updated-at <iso> --status <status> [--note <text>]`);
 }
@@ -130,6 +139,103 @@ function runGhJson(ghArgs) {
     stdio: ["ignore", "pipe", "pipe"],
   });
   return JSON.parse(stdout || "[]");
+}
+
+function runGit(gitArgs) {
+  return execFileSync("git", gitArgs, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+function isUserFacingChange(subject, body) {
+  const firstBodyLine = (body ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  const effectiveTitle =
+    subject.startsWith("Merge pull request #") && firstBodyLine ? firstBodyLine : subject;
+
+  const match = effectiveTitle.match(USER_FACING_COMMIT_PATTERN);
+  if (match) {
+    const scope = (match[2] ?? "").trim();
+    if (scope && INTERNAL_COMMIT_SCOPE_PATTERN.test(scope)) {
+      return null;
+    }
+    return effectiveTitle;
+  }
+
+  if (USER_FACING_STYLE_PATTERN.test(effectiveTitle)) {
+    return effectiveTitle;
+  }
+
+  if (
+    subject.startsWith("Merge pull request #") &&
+    /\/(feat|fix|perf)\//i.test(subject) &&
+    !/\/(automation|ci|docs|test|chore)\//i.test(subject)
+  ) {
+    return effectiveTitle;
+  }
+
+  return null;
+}
+
+function computeReleaseReminder(threshold) {
+  try {
+    const tags = runGit(["tag", "--list", "v*", "--sort=-v:refname"])
+      .split(/\r?\n/)
+      .map((t) => t.trim())
+      .filter((t) => /^v\d+\.\d+\.\d+$/.test(t));
+    const latestStableTag = tags[0] ?? null;
+    if (!latestStableTag) {
+      return {
+        latestStableTag: null,
+        threshold,
+        userFacingCount: 0,
+        totalCommits: 0,
+        shouldRemind: false,
+        recentChanges: [],
+      };
+    }
+
+    const rawLog = runGit([
+      "log",
+      "--first-parent",
+      "--format=%s%x1f%b%x1e",
+      `${latestStableTag}..HEAD`,
+    ]);
+    const entries = rawLog
+      .split("\x1e")
+      .map((chunk) => chunk.trim())
+      .filter(Boolean);
+
+    const userFacingChanges = [];
+    for (const entry of entries) {
+      const [subject = "", body = ""] = entry.split("\x1f");
+      const title = isUserFacingChange(subject.trim(), body);
+      if (title) {
+        userFacingChanges.push(title);
+      }
+    }
+
+    return {
+      latestStableTag,
+      threshold,
+      userFacingCount: userFacingChanges.length,
+      totalCommits: entries.length,
+      shouldRemind: threshold > 0 && userFacingChanges.length >= threshold,
+      recentChanges: userFacingChanges.slice(0, 12),
+    };
+  } catch {
+    return {
+      latestStableTag: null,
+      threshold,
+      userFacingCount: 0,
+      totalCommits: 0,
+      shouldRemind: false,
+      recentChanges: [],
+    };
+  }
 }
 
 function computeStaleDays(nowMs, updatedAtIso, lastCheckedAtIso) {
@@ -213,7 +319,9 @@ function classifyPr(pr, previousEntry, nowMs, cooldownMinutes, staleDaysThreshol
 
   const files = (detail.files ?? []).map((f) => f.path);
   const prodFiles = files.filter((p) => !DOC_OR_TEST_PATTERNS.some((re) => re.test(p)));
+  const isDocsOnly = prodFiles.length === 0;
   const hasUi = files.some((p) => UI_PATH_PATTERNS.some((re) => re.test(p)));
+  const hasRust = files.some((p) => RUST_PATH_PATTERN.test(p));
   const highRiskPaths = files.filter((p) => HIGH_RISK_PATH_PATTERNS.some((re) => re.test(p)));
 
   const authorLogin = pr.author?.login ?? "unknown";
@@ -226,6 +334,11 @@ function classifyPr(pr, previousEntry, nowMs, cooldownMinutes, staleDaysThreshol
   } else if (hasUi || totalChanges > 150 || prodFiles.length > 5) {
     tier = "L2";
   }
+
+  const dispatchMode =
+    tier === "L1" && (isDocsOnly || (totalChanges <= 30 && !hasUi && !hasRust))
+      ? "bundle"
+      : "dedicated";
 
   const isIncremental = Boolean(
     previousEntry?.reviewedSha && previousEntry.reviewedSha !== headSha,
@@ -250,7 +363,10 @@ function classifyPr(pr, previousEntry, nowMs, cooldownMinutes, staleDaysThreshol
       rounds,
       circuitBreakerHit: rounds >= 2,
       tier,
+      dispatchMode,
+      isDocsOnly,
       hasUi,
+      hasRust,
       highRiskPaths,
       additions: pr.additions ?? 0,
       deletions: pr.deletions ?? 0,
@@ -386,12 +502,14 @@ function runPreflight(args) {
     }
   }
 
+  const releaseReminder = computeReleaseReminder(args.releaseThreshold);
   const hasWork = actionablePrs.length > 0 || actionableIssues.length > 0;
   const output = {
     checkedAt: new Date(nowMs).toISOString(),
     cooldownMinutes: args.cooldownMinutes,
     staleDays: args.staleDays,
     hasWork,
+    releaseReminder,
     summary: {
       actionablePrCount: actionablePrs.length,
       skippedPrCount: skippedPrs.length,
