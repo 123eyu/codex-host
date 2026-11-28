@@ -241,9 +241,8 @@ export class RemoteSessions {
   >();
   private readonly peerInteractionReads = new Map<
     string,
-    { dirty: boolean; promise: Promise<void> }
+    { dirty: boolean; cancelled: boolean; promise: Promise<void> }
   >();
-  private readonly syncedPeerRunningInteractions = new Map<string, Set<string>>();
   private readonly followLifetime = new AbortController();
   /** When a periodic check first found each view without a follower. */
   private readonly unfollowedSince = new WeakMap<ChThreadView, number>();
@@ -358,10 +357,11 @@ export class RemoteSessions {
       active.dirty = true;
       return active.promise;
     }
-    const state = { dirty: true, promise: Promise.resolve() };
+    const state = { dirty: true, cancelled: false, promise: Promise.resolve() };
+    this.peerInteractionReads.set(id, state);
     state.promise = (async () => {
       try {
-        while (state.dirty && !this.closed) {
+        while (state.dirty && !state.cancelled && !this.closed) {
           state.dirty = false;
           const currentSource = this.peers?.source(hostId);
           if (!currentSource) return;
@@ -380,16 +380,21 @@ export class RemoteSessions {
             return;
           }
           if (
+            state.cancelled ||
             this.closed ||
             this.peers?.source(hostId) !== currentSource ||
-            (this.peerResetRevisions.get(hostId) ?? 0) !== startResetRevision ||
             this.hosts.get(hostId)?.online === false
           ) {
             return;
           }
           const latestEntry = this.entries.get(id);
           if (latestEntry && !latestEntry.online) return;
-          if (expectedEpoch && snapshot.cursor.epoch !== expectedEpoch) return;
+          if (
+            (this.peerResetRevisions.get(hostId) ?? 0) !== startResetRevision ||
+            (expectedEpoch && snapshot.cursor.epoch !== expectedEpoch)
+          ) {
+            continue;
+          }
           this.interactionsForPeer(hostId, currentSource).update(snapshot, id);
         }
       } finally {
@@ -398,7 +403,6 @@ export class RemoteSessions {
         }
       }
     })();
-    this.peerInteractionReads.set(id, state);
     return state.promise;
   }
   private handlePeerConfigurationChanged(hostId: string, threadId: string): void {
@@ -444,7 +448,6 @@ export class RemoteSessions {
     this.syncedPeerSources.delete(hostId);
     this.peerTreeRetryAttempts.delete(hostId);
     this.clearPeerChangeTimer(hostId);
-    this.syncedPeerRunningInteractions.delete(hostId);
     this.clearPeerInteractions(hostId);
     const host = this.hosts.get(hostId);
     if (host) host.online = false;
@@ -482,7 +485,6 @@ export class RemoteSessions {
       }
     }
     if (full || epochChanged) {
-      this.syncedPeerRunningInteractions.delete(hostId);
       this.clearPeerInteractions(hostId);
       for (const entry of this.entries.values()) {
         if (entry.identity.hostId === hostId) {
@@ -1493,24 +1495,12 @@ export class RemoteSessions {
         if (summaryChanged) {
           this.events.emit("api-session/added", nextSummary);
         }
-        let synced = this.syncedPeerRunningInteractions.get(host.hostId);
-        if (current.row.status.type === "active" && !current.archived) {
-          if (!current.view && !synced?.has(current.identity.threadId)) {
-            if (!synced) {
-              synced = new Set<string>();
-              this.syncedPeerRunningInteractions.set(host.hostId, synced);
-            }
-            synced.add(current.identity.threadId);
-            void this.handlePeerInteractionChanged(host.hostId, current.identity.threadId);
-          }
-        } else {
-          synced?.delete(current.identity.threadId);
-          if (
-            !current.view &&
-            this.peerInteractions.get(host.hostId)?.interactions.hasPending(id)
-          ) {
-            void this.handlePeerInteractionChanged(host.hostId, current.identity.threadId);
-          }
+        if (
+          current.row.status.type !== "active" &&
+          !current.view &&
+          this.peerInteractions.get(host.hostId)?.interactions.hasPending(id)
+        ) {
+          void this.handlePeerInteractionChanged(host.hostId, current.identity.threadId);
         }
       }
       if (pinRevision === this.pinRevision) {
@@ -2021,6 +2011,12 @@ export class RemoteSessions {
         hostId = undefined;
       }
     }
+    const activeRead = this.peerInteractionReads.get(id);
+    if (activeRead) {
+      activeRead.cancelled = true;
+      activeRead.dirty = false;
+      this.peerInteractionReads.delete(id);
+    }
     if (hostId) this.peerInteractions.get(hostId)?.interactions.clearSession(id);
   }
   async read(id: string, force = false): Promise<ChThreadView> {
@@ -2402,12 +2398,6 @@ export class RemoteSessions {
           (this.peerResetRevisions.get(current.identity.hostId) ?? 0) === startResetRevision
         ) {
           this.interactionsForPeer(current.identity.hostId, source).update(snapshot, id);
-          let synced = this.syncedPeerRunningInteractions.get(current.identity.hostId);
-          if (!synced) {
-            synced = new Set<string>();
-            this.syncedPeerRunningInteractions.set(current.identity.hostId, synced);
-          }
-          synced.add(current.identity.threadId);
         }
         if (JSON.stringify(summary) !== before) this.events.emit("api-session/added", summary);
         this.events.emit("api-session/status", id, summary.running);
@@ -3677,8 +3667,11 @@ export class RemoteSessions {
     for (const id of this.entries.keys()) this.clearPending(id);
     for (const peer of this.peerInteractions.values()) peer.interactions.clear();
     this.peerInteractions.clear();
+    for (const active of this.peerInteractionReads.values()) {
+      active.cancelled = true;
+      active.dirty = false;
+    }
     this.peerInteractionReads.clear();
-    this.syncedPeerRunningInteractions.clear();
     for (const entry of this.entries.values()) entry.view?.log.reconnectFollowers();
     this.peerArchivedIds.clear();
     this.peerPinnedIds.clear();

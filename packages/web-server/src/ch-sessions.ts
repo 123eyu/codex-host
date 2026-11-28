@@ -147,7 +147,10 @@ export class ChSessions {
   private readonly skills: WebSkills;
   private readonly titleRequests = new Set<string>();
   private readonly interactions: ChInteractions | undefined;
-  private readonly interactionReads = new Map<string, { dirty: boolean; promise: Promise<void> }>();
+  private readonly interactionReads = new Map<
+    string,
+    { dirty: boolean; cancelled: boolean; promise: Promise<void> }
+  >();
   private readonly syncedRunningInteractions = new Set<string>();
   private hostOnline = true;
   private hostEpoch: string | undefined;
@@ -1435,10 +1438,11 @@ export class ChSessions {
       return active.promise;
     }
     const realtime = this.host.realtime;
-    const state = { dirty: true, promise: Promise.resolve() };
+    const state = { dirty: true, cancelled: false, promise: Promise.resolve() };
+    this.interactionReads.set(threadId, state);
     state.promise = (async () => {
       try {
-        while (state.dirty && !this.closed && this.hostOnline) {
+        while (state.dirty && !state.cancelled && !this.closed && this.hostOnline) {
           state.dirty = false;
           const startEpoch = this.hostEpoch;
           let snapshot;
@@ -1448,15 +1452,23 @@ export class ChSessions {
             return;
           }
           if (
+            state.cancelled ||
             this.closed ||
             !this.hostOnline ||
-            (startEpoch !== undefined && snapshot.cursor.epoch !== startEpoch) ||
-            (this.hostEpoch !== undefined && snapshot.cursor.epoch !== this.hostEpoch) ||
             this.refreshingDeletedIds?.has(threadId)
           ) {
             return;
           }
+          if (
+            (startEpoch !== undefined && snapshot.cursor.epoch !== startEpoch) ||
+            (this.hostEpoch !== undefined && snapshot.cursor.epoch !== this.hostEpoch)
+          ) {
+            continue;
+          }
           this.interactions?.update(snapshot);
+          if (this.rows.get(threadId)?.status.type === "active") {
+            this.syncedRunningInteractions.add(threadId);
+          }
         }
       } finally {
         if (this.interactionReads.get(threadId) === state) {
@@ -1464,15 +1476,17 @@ export class ChSessions {
         }
       }
     })();
-    this.interactionReads.set(threadId, state);
     return state.promise;
   }
 
   private syncBackgroundRunningInteractions(): void {
     for (const row of this.rows.values()) {
       if (row.status.type === "active") {
-        if (!this.syncedRunningInteractions.has(row.id) && !this.threads.view(row.id)) {
-          this.syncedRunningInteractions.add(row.id);
+        if (
+          !this.syncedRunningInteractions.has(row.id) &&
+          !this.interactionReads.has(row.id) &&
+          !this.threads.view(row.id)
+        ) {
           void this.reconcileBackgroundInteractions(row.id);
         }
       } else {
@@ -1490,6 +1504,12 @@ export class ChSessions {
     this.queueOperations.delete(id);
     this.titleRequests.delete(id);
     this.syncedRunningInteractions.delete(id);
+    const activeRead = this.interactionReads.get(id);
+    if (activeRead) {
+      activeRead.cancelled = true;
+      activeRead.dirty = false;
+      this.interactionReads.delete(id);
+    }
     this.interactions?.clearSession(id);
     this.workspacePageRows.delete(id);
     this.rows.delete(id);
