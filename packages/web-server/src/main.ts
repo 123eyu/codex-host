@@ -16,6 +16,7 @@ import { PeerHostManager, createCompositeRemoteCall } from "./peer-host-manager.
 import { loadOrCreatePeerNodeId, PeerHostStore } from "./peer-host-store.ts";
 import { PeerEndpointError, peerEndpoint, resolveServerVersion } from "./peer-manifest.ts";
 import { servePeerAttachments } from "./peer-attachments-http.ts";
+import { matchesImageETag } from "./peer-image-http.ts";
 import { peerPairingEnabled, servePeerPairing } from "./peer-pairing-http.ts";
 import { resolvePeerSelfOrigin } from "./peer-pairing.ts";
 import { servePeerDelegation } from "./peer-delegation-http.ts";
@@ -717,20 +718,34 @@ const server = createWebServer((request, response) => {
     }
     if (pathname === "/api/file" && (request.method === "GET" || request.method === "HEAD")) {
       const path = new URL(url, "http://localhost").searchParams.get("path");
-      response.setHeader("Cache-Control", "private, no-store");
       if (!path) {
-        response.writeHead(400).end(request.method === "HEAD" ? undefined : "missing path");
+        response
+          .writeHead(400, { "Cache-Control": "private, no-store" })
+          .end(request.method === "HEAD" ? undefined : "missing path");
         return;
       }
       try {
         const image = inspectImage(readImageFile(path));
+        const etag = `"${image.leaf}"`;
+        const cacheHeaders = {
+          "Cache-Control": "private, no-cache",
+          ETag: etag,
+          Vary: "Authorization, Cookie",
+        };
+        if (matchesImageETag(request.headers["if-none-match"], etag)) {
+          response.writeHead(304, cacheHeaders).end();
+          return;
+        }
         response.writeHead(200, {
+          ...cacheHeaders,
           "Content-Type": image.ref.mediaType,
           "Content-Length": image.bytes.length,
         });
         response.end(request.method === "HEAD" ? undefined : image.bytes);
       } catch {
-        response.writeHead(404).end(request.method === "HEAD" ? undefined : "image unavailable");
+        response
+          .writeHead(404, { "Cache-Control": "private, no-store" })
+          .end(request.method === "HEAD" ? undefined : "image unavailable");
       }
       return;
     }

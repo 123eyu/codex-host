@@ -28,7 +28,11 @@ function makeRef(
   };
 }
 
-function createHarness(options?: { maxEntries?: number; maxBytes?: number }) {
+function createHarness(options?: {
+  maxEntries?: number;
+  maxBytes?: number;
+  maxDecodedBytes?: number;
+}) {
   const disposers: Array<() => void> = [];
   const ctx = {
     effect(fn: () => (() => void) | void) {
@@ -606,5 +610,231 @@ describe("HistoricalImageCache", () => {
     expect(seedImageUrl).toHaveBeenCalledTimes(1);
     expect(revokedUrls).toEqual([]);
     expect(cache.peek(sessionId, peerRef)).toBe("blob:fallback-test-1");
+  });
+
+  it("evicts LRU entries by decoded RGBA pixel budget even when compressed bytes are small", async () => {
+    // 3024 x 1964 x 4 = 23,756,544 bytes (~22.7 MiB) decoded RGBA per Retina screenshot,
+    // while compressed size is only 200 KiB each.
+    const harness = createHarness({
+      maxEntries: 20,
+      maxBytes: 24 * 1024 * 1024,
+      maxDecodedBytes: 50 * 1024 * 1024,
+    });
+    cleanups.push(() => {
+      harness.dispose();
+      harness.restoreUrls();
+    });
+
+    harness.mountSession(
+      "sess-rgba",
+      vi.fn(async (attachmentId: AttachmentId) => ({
+        ok: true as const,
+        value: {
+          attachment: makeRef(attachmentId, { bytes: 200_000, width: 3024, height: 1964 }),
+          data: new Uint8Array(200_000),
+        },
+      })),
+    );
+
+    const r1 = makeRef("retina-1", { bytes: 200_000, width: 3024, height: 1964 });
+    const r2 = makeRef("retina-2", { bytes: 200_000, width: 3024, height: 1964 });
+    const r3 = makeRef("retina-3", { bytes: 200_000, width: 3024, height: 1964 });
+
+    const u1 = await harness.cache.resolve("sess-rgba" as SessionId, r1);
+    const u2 = await harness.cache.resolve("sess-rgba" as SessionId, r2);
+    expect(harness.revokedUrls).toEqual([]);
+
+    // Adding the 3rd screenshot (~71.3 MiB RGBA > 50 MiB budget) evicts retina-1.
+    const u3 = await harness.cache.resolve("sess-rgba" as SessionId, r3);
+    expect(harness.revokedUrls).toEqual([u1]);
+    expect(harness.cache.peek("sess-rgba" as SessionId, r1)).toBeUndefined();
+    expect(harness.cache.peek("sess-rgba" as SessionId, r2)).toBe(u2);
+    expect(harness.cache.peek("sess-rgba" as SessionId, r3)).toBe(u3);
+  });
+
+  it("accounts for unknown-dimension uploads via fallback decoded estimate and uses exact RGBA when dimensions are supplied", () => {
+    const harness = createHarness({
+      maxEntries: 20,
+      maxBytes: 24 * 1024 * 1024,
+      maxDecodedBytes: 10_000,
+    });
+    cleanups.push(() => {
+      harness.dispose();
+      harness.restoreUrls();
+    });
+    harness.mountSession("sess-upload-rgba");
+
+    // Unknown dimensions: 1,000 compressed bytes * 8 = 8,000 estimated decoded bytes.
+    harness.cache.cacheUploaded("sess-upload-rgba" as SessionId, {
+      attachmentId: "web-image:unknown-dim.webp",
+      blob: new Blob([new Uint8Array(1000)], { type: "image/webp" }),
+      bytes: 1000,
+    });
+    // Exact dimensions: 50 x 50 x 4 = 10,000 decoded bytes -> pushes total to 18,000 > 10,000, evicting first.
+    harness.cache.cacheUploaded("sess-upload-rgba" as SessionId, {
+      attachmentId: "web-image:known-dim.webp",
+      blob: new Blob([new Uint8Array(100)], { type: "image/webp" }),
+      bytes: 100,
+      width: 50,
+      height: 50,
+    });
+
+    expect(harness.revokedUrls).toEqual(["blob:test-1"]);
+    expect(
+      harness.cache.peek("sess-upload-rgba" as SessionId, makeRef("web-image:unknown-dim.webp")),
+    ).toBeUndefined();
+    expect(
+      harness.cache.peek("sess-upload-rgba" as SessionId, makeRef("web-image:known-dim.webp")),
+    ).toBe("blob:test-2");
+  });
+
+  it("avoids redundant Uint8Array.from copies when creating Blob URLs from ArrayBuffer-backed data", async () => {
+    const harness = createHarness();
+    const capturedBlobs: Blob[] = [];
+    const originalCreate = URL.createObjectURL;
+    URL.createObjectURL = vi.fn((blob: Blob) => {
+      capturedBlobs.push(blob);
+      return originalCreate(blob);
+    });
+    const fromSpy = vi.spyOn(Uint8Array, "from");
+    cleanups.push(() => {
+      fromSpy.mockRestore();
+      harness.dispose();
+      harness.restoreUrls();
+    });
+
+    const backing = new Uint8Array([10, 20, 30, 40, 50, 60]);
+    const sliced = backing.subarray(2, 5);
+    const whole = new Uint8Array([1, 2, 3, 4]);
+
+    harness.mountSession(
+      "sess-nocopy",
+      vi.fn(async (attachmentId: AttachmentId) => ({
+        ok: true as const,
+        value: {
+          attachment: makeRef(attachmentId, { bytes: attachmentId === "slice" ? 3 : 4 }),
+          data: attachmentId === "slice" ? sliced : whole,
+        },
+      })),
+    );
+
+    await harness.cache.resolve("sess-nocopy" as SessionId, makeRef("whole", { bytes: 4 }));
+    await harness.cache.resolve("sess-nocopy" as SessionId, makeRef("slice", { bytes: 3 }));
+
+    expect(fromSpy).not.toHaveBeenCalled();
+    expect(capturedBlobs).toHaveLength(2);
+    expect(new Uint8Array(await capturedBlobs[0]!.arrayBuffer())).toEqual(whole);
+    expect(new Uint8Array(await capturedBlobs[1]!.arrayBuffer())).toEqual(
+      new Uint8Array([30, 40, 50]),
+    );
+  });
+
+  it("clears probe Image src and handlers on settle and forwards probed dimensions to cacheUploadedImage", async () => {
+    const probes: Array<{
+      src: string;
+      naturalWidth: number;
+      naturalHeight: number;
+      onload: (() => void) | null;
+      onerror: (() => void) | null;
+    }> = [];
+    class FakeImage {
+      src = "";
+      naturalWidth = 2560;
+      naturalHeight = 1440;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      constructor() {
+        probes.push(this);
+      }
+    }
+    vi.stubGlobal("Image", FakeImage);
+
+    const originalCreate = URL.createObjectURL;
+    const originalRevoke = URL.revokeObjectURL;
+    let nextBlobId = 0;
+    URL.createObjectURL = vi.fn(() => `blob:probe-${++nextBlobId}`);
+    URL.revokeObjectURL = vi.fn();
+
+    const ctx = new Context();
+    const sessionId = "sess-probe" as SessionId;
+    const cacheUploadedImage = vi.fn(() => true);
+    const resolveUploads: Array<() => void> = [];
+    const upload = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveUploads.push(() =>
+            resolve({
+              ok: true as const,
+              value: {
+                receiptId: "receipt-probe-1",
+                file: {
+                  attachmentId: `web-image:${"a".repeat(64)}.webp`,
+                  name: "shot.webp",
+                  bytes: 4096,
+                },
+              },
+            }),
+          );
+        }),
+    );
+
+    ctx.provide("sessions", {
+      binding: () => undefined,
+      retain: () => ({ release: vi.fn() }),
+    } as never);
+    ctx.provide("uiConversation", { cacheUploadedImage } as never);
+    ctx.provide("fileUpload", { upload } as never);
+    ctx.provide("locale", { bind: () => (key: string) => key } as never);
+
+    const controller = new ConversationController(ctx, {
+      input: {} as SessionInputResolver,
+      blocks: {} as ComposerBlocks,
+      maxConcurrentFileUploads: 2,
+    });
+
+    cleanups.push(() => {
+      void ctx.fiber.dispose();
+      vi.unstubAllGlobals();
+      URL.createObjectURL = originalCreate;
+      URL.revokeObjectURL = originalRevoke;
+    });
+
+    const f1 = new File([new Uint8Array(2048)], "shot.webp", { type: "image/webp" });
+    const f2 = new File([new Uint8Array(2048)], "broken.webp", { type: "image/webp" });
+    const [d1, d2] = controller.createDrafts(sessionId, [f1, f2]);
+    expect(probes).toHaveLength(2);
+    expect(probes[0]!.src).toBe("blob:probe-1");
+    expect(probes[1]!.src).toBe("blob:probe-2");
+
+    // Successful probe sets dimensions, then clears src and handlers.
+    probes[0]!.onload?.();
+    expect(d1?.kind === "image" ? d1.width : undefined).toBe(2560);
+    expect(d1?.kind === "image" ? d1.height : undefined).toBe(1440);
+    expect(probes[0]!.src).toBe("");
+    expect(probes[0]!.onload).toBeNull();
+    expect(probes[0]!.onerror).toBeNull();
+
+    // Failed probe also clears src and handlers.
+    probes[1]!.onerror?.();
+    expect(d2?.kind === "image" ? d2.width : undefined).toBeUndefined();
+    expect(probes[1]!.src).toBe("");
+    expect(probes[1]!.onload).toBeNull();
+    expect(probes[1]!.onerror).toBeNull();
+
+    // Upload completion forwards probed width & height to cacheUploadedImage.
+    await vi.waitFor(() => {
+      expect(resolveUploads.length).toBeGreaterThanOrEqual(1);
+    });
+    resolveUploads[0]!();
+    await vi.waitFor(() => {
+      expect(cacheUploadedImage).toHaveBeenCalled();
+    });
+    expect(cacheUploadedImage).toHaveBeenCalledWith(
+      sessionId,
+      expect.objectContaining({
+        width: 2560,
+        height: 1440,
+      }),
+    );
   });
 });

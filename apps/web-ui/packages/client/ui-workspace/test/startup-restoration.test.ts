@@ -17,9 +17,12 @@ import { SessionId } from "@deepseek-ai/dsh-session/types";
 import type { WorkspaceId } from "@deepseek-ai/dsh-workspace/types";
 import { UiWorkspaceService } from "../src/client/navigation.ts";
 import {
+  MAX_BACKGROUND_RUNNING_SESSIONS,
   MAX_STOPPED_WARM_BYTES,
   MAX_STOPPED_WARM_SESSIONS,
+  MAX_TOTAL_WARM_BYTES,
   SessionKeepalive,
+  WARM_SESSION_ASSEMBLY_OVERHEAD_FACTOR,
 } from "../src/client/session-keepalive.ts";
 
 const originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
@@ -513,6 +516,9 @@ function createKeepaliveHarness(options: {
   bytesById?: Readonly<Record<string, number>>;
   maxStoppedSessions?: number;
   maxStoppedBytes?: number;
+  maxBackgroundRunningSessions?: number;
+  maxTotalBytes?: number;
+  assemblyOverheadFactor?: number;
 }) {
   const runningSet = new Set(options.runningIds ?? []);
   const bytesById = new Map<SessionId, number>(
@@ -614,6 +620,13 @@ function createKeepaliveHarness(options: {
       ? {}
       : { maxStoppedSessions: options.maxStoppedSessions }),
     ...(options.maxStoppedBytes === undefined ? {} : { maxStoppedBytes: options.maxStoppedBytes }),
+    ...(options.maxBackgroundRunningSessions === undefined
+      ? {}
+      : { maxBackgroundRunningSessions: options.maxBackgroundRunningSessions }),
+    ...(options.maxTotalBytes === undefined ? {} : { maxTotalBytes: options.maxTotalBytes }),
+    ...(options.assemblyOverheadFactor === undefined
+      ? {}
+      : { assemblyOverheadFactor: options.assemblyOverheadFactor }),
   });
   const stop = keepalive.start();
 
@@ -634,6 +647,7 @@ function createKeepaliveHarness(options: {
     stop,
     warmIds,
     openInMain,
+    retainExtra: (id: SessionId, source: string) => retain(id, { source }),
     setBytes: (id: SessionId, bytes: number) => bytesById.set(id, bytes),
     releaseMain: () => {
       const previous = currentMain;
@@ -643,9 +657,12 @@ function createKeepaliveHarness(options: {
   };
 }
 
-it("caps stopped warm sessions at 4 slots and evicts oldest stopped sessions above byte budget", () => {
+it("caps stopped warm sessions at 4 slots and applies the 3x assembly overhead factor to byte budgets", () => {
   assert.equal(MAX_STOPPED_WARM_SESSIONS, 4);
   assert.equal(MAX_STOPPED_WARM_BYTES, 32 * 1024 * 1024);
+  assert.equal(MAX_BACKGROUND_RUNNING_SESSIONS, 2);
+  assert.equal(MAX_TOTAL_WARM_BYTES, 48 * 1024 * 1024);
+  assert.equal(WARM_SESSION_ASSEMBLY_OVERHEAD_FACTOR, 3);
 
   const ids = ["s1", "s2", "s3", "s4", "s5"].map((id) => SessionId(id));
   const slotHarness = createKeepaliveHarness({
@@ -666,21 +683,22 @@ it("caps stopped warm sessions at 4 slots and evicts oldest stopped sessions abo
     SessionId,
     SessionId,
   ];
+  // With default 3x assembly overhead: raw 12 -> 36 effective bytes, raw 4 -> 12 effective bytes.
   const byteHarness = createKeepaliveHarness({
     sessionIds: [b1, b2, b3, b4],
     bytesById: { [b1]: 12, [b2]: 12, [b3]: 12, [b4]: 4 },
-    maxStoppedBytes: 30,
+    maxStoppedBytes: 90,
   });
   try {
     byteHarness.openInMain(b1);
     byteHarness.openInMain(b2);
     assert.deepEqual(byteHarness.warmIds(), [b1, b2]);
 
-    // Adding b3 (total 36 > 30) evicts oldest stopped session b1 while retaining b2 + b3.
+    // Adding b3 (effective 108 > 90) evicts oldest stopped session b1 while retaining b2 + b3.
     byteHarness.openInMain(b3);
     assert.deepEqual(byteHarness.warmIds(), [b2, b3]);
 
-    // Switching to small b4 fits within 30 (12 + 12 + 4 = 28) without further eviction.
+    // Switching to small b4 fits within 90 (36 + 36 + 12 = 84) without further eviction.
     byteHarness.openInMain(b4);
     assert.deepEqual(byteHarness.warmIds(), [b2, b3, b4]);
   } finally {
@@ -689,38 +707,86 @@ it("caps stopped warm sessions at 4 slots and evicts oldest stopped sessions abo
   }
 });
 
-it("never evicts running sessions or the currently viewed main session when warm bytes exceed budget", () => {
-  const running = SessionId("running-heavy");
+it("does not eagerly retain never-visited running sessions and bounds visited background running sessions by count and total bytes", () => {
+  const unvisitedRunning = SessionId("running-unvisited");
+  const run1 = SessionId("running-1");
+  const run2 = SessionId("running-2");
+  const run3 = SessionId("running-3");
+  const currentStopped = SessionId("stopped-current");
   const oldStopped = SessionId("stopped-old");
-  const currentHeavy = SessionId("current-heavy");
-  const nextSmall = SessionId("next-small");
 
-  const harness = createKeepaliveHarness({
-    sessionIds: [running, oldStopped, currentHeavy, nextSmall],
-    runningIds: [running],
+  const countHarness = createKeepaliveHarness({
+    sessionIds: [unvisitedRunning, run1, run2, run3, currentStopped],
+    runningIds: [unvisitedRunning, run1, run2, run3],
     bytesById: {
-      [running]: 100,
-      [oldStopped]: 10,
-      [currentHeavy]: 50,
-      [nextSmall]: 5,
+      [unvisitedRunning]: 5,
+      [run1]: 5,
+      [run2]: 5,
+      [run3]: 5,
+      [currentStopped]: 5,
     },
-    maxStoppedBytes: 30,
+    maxBackgroundRunningSessions: 2,
+    maxTotalBytes: 1_000,
   });
   try {
-    assert.deepEqual(harness.warmIds(), [running]);
+    // Never-visited running catalog sessions are not eagerly retained.
+    assert.deepEqual(countHarness.warmIds(), []);
 
-    harness.openInMain(oldStopped);
-    assert.deepEqual(harness.warmIds(), [running, oldStopped]);
+    countHarness.openInMain(run1);
+    countHarness.openInMain(run2);
+    // run3 is currently viewed in mainView, so only run1 and run2 are background running (2 <= 2).
+    countHarness.openInMain(run3);
+    assert.deepEqual(countHarness.warmIds(), [run1, run2, run3]);
 
-    // Viewing currentHeavy (50 > 30 budget) evicts oldStopped, but keeps both running and currentHeavy.
-    harness.openInMain(currentHeavy);
-    assert.deepEqual(harness.warmIds(), [running, currentHeavy]);
-
-    // Switching away from currentHeavy to nextSmall releases mainView on currentHeavy, allowing budget eviction.
-    harness.openInMain(nextSmall);
-    assert.deepEqual(harness.warmIds(), [running, nextSmall]);
+    // Switching to currentStopped puts run1, run2, run3 in background (3 > 2), evicting oldest run1.
+    countHarness.openInMain(currentStopped);
+    assert.deepEqual(countHarness.warmIds(), [run2, run3, currentStopped]);
   } finally {
-    harness.releaseMain();
-    harness.stop();
+    countHarness.releaseMain();
+    countHarness.stop();
+  }
+
+  // Total byte budget evicts non-protected stopped sessions first, then oldest background running
+  // sessions, while never evicting sessions held by an active view (mainView or sidebarView).
+  const sidebarPinned = SessionId("sidebar-running");
+  const extraStopped = SessionId("stopped-extra");
+  const byteHarness = createKeepaliveHarness({
+    sessionIds: [sidebarPinned, run1, oldStopped, extraStopped, currentStopped],
+    runningIds: [sidebarPinned, run1],
+    bytesById: {
+      [sidebarPinned]: 10, // 30 effective
+      [run1]: 15, // 45 effective
+      [oldStopped]: 10, // 30 effective
+      [extraStopped]: 5, // 15 effective
+      [currentStopped]: 20, // 60 effective
+    },
+    maxStoppedBytes: 100,
+    maxTotalBytes: 90,
+  });
+  let sidebarRef: SessionReference | undefined;
+  try {
+    // Phase 1: when total exceeds maxTotalBytes, non-protected stopped (oldStopped) is evicted
+    // BEFORE background running (run1), keeping run1 warm alongside the active view.
+    byteHarness.openInMain(oldStopped);
+    byteHarness.openInMain(run1);
+    byteHarness.openInMain(extraStopped);
+    // oldStopped(30) + run1(45) + extraStopped(15) = 90 <= 90 -> all fit.
+    assert.deepEqual(byteHarness.warmIds(), [run1, oldStopped, extraStopped]);
+
+    // Adding sidebarPinned(30) -> 120 > 90: non-protected stopped oldStopped(30) yields first,
+    // keeping background running run1(45) + extraStopped(15) + sidebarPinned(30) = 90 <= 90.
+    byteHarness.openInMain(sidebarPinned);
+    sidebarRef = byteHarness.retainExtra(sidebarPinned, "sidebarView");
+    assert.deepEqual(byteHarness.warmIds(), [sidebarPinned, run1, extraStopped]);
+
+    // Phase 2: viewing currentStopped(60) -> 30 + 45 + 15 + 60 = 150 > 90:
+    // extraStopped(15) is evicted first (total 135 > 90), then background running run1(45) is
+    // evicted (total 90 <= 90); both protected views (sidebarPinned and currentStopped) remain.
+    byteHarness.openInMain(currentStopped);
+    assert.deepEqual(byteHarness.warmIds(), [sidebarPinned, currentStopped]);
+  } finally {
+    sidebarRef?.release();
+    byteHarness.releaseMain();
+    byteHarness.stop();
   }
 });

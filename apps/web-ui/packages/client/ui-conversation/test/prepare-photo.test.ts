@@ -16,6 +16,7 @@ function installCanvasEnvironment(options: {
   const close = vi.fn();
   const drawImage = vi.fn();
   const calls: CanvasCall[] = [];
+  const canvases: Array<{ width: number; height: number }> = [];
 
   const createImageBitmapMock = vi.fn(async () => ({
     width: options.bitmapWidth,
@@ -25,9 +26,11 @@ function installCanvasEnvironment(options: {
 
   class FakeOffscreenCanvas {
     constructor(
-      public readonly width: number,
-      public readonly height: number,
-    ) {}
+      public width: number,
+      public height: number,
+    ) {
+      canvases.push(this);
+    }
 
     getContext(kind: string) {
       return kind === "2d" ? { drawImage } : null;
@@ -49,7 +52,7 @@ function installCanvasEnvironment(options: {
 
   vi.stubGlobal("createImageBitmap", createImageBitmapMock);
   vi.stubGlobal("OffscreenCanvas", FakeOffscreenCanvas);
-  return { close, drawImage, calls, createImageBitmapMock };
+  return { close, drawImage, calls, canvases, createImageBitmapMock };
 }
 
 function makeFile(name: string, type: string, bytes: number, lastModified = 1_700_000_000_000) {
@@ -184,5 +187,20 @@ describe("preparePhoto", () => {
     expect(result.name).toBe("camera.jpg");
     expect(result.size).toBe(200 * 1024);
     expect(env.calls).toEqual([{ width: 2048, height: 1536, type: "image/jpeg", quality: 0.85 }]);
+    expect(env.canvases).toHaveLength(1);
+    expect(env.canvases[0]).toMatchObject({ width: 0, height: 0 });
+  });
+
+  it("zeros canvas dimensions in finally even when encoding fails", async () => {
+    const env = installCanvasEnvironment({
+      bitmapWidth: 3200,
+      bitmapHeight: 2400,
+      encode: () => null,
+    });
+    const photo = makeFile("fail.jpeg", "image/jpeg", 3 * 1024 * 1024);
+    expect(await preparePhoto(photo)).toBe(photo);
+    expect(env.canvases).toHaveLength(1);
+    expect(env.canvases[0]).toMatchObject({ width: 0, height: 0 });
+    expect(env.close).toHaveBeenCalledTimes(1);
   });
 });

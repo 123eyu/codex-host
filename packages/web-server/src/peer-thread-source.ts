@@ -57,6 +57,7 @@ export interface PeerThreadSourceOptions {
   host: PeerChHostClient;
   onCatalogChanged(): unknown;
   onThreadChanged(threadId: string): unknown;
+  onThreadInteraction?: (threadId: string) => unknown;
   onThreadConfigurationChanged?: (threadId: string) => void;
   onUsageChanged?: (threadId: string) => void;
   onCatalogInspectionChanged?: () => void;
@@ -219,6 +220,9 @@ export class PeerThreadSource {
       {
         thread: async (threadId) => {
           await options.onThreadChanged(threadId);
+        },
+        interaction: async (threadId) => {
+          await options.onThreadInteraction?.(threadId);
         },
         usage: (threadId) => {
           options.onUsageChanged?.(threadId);

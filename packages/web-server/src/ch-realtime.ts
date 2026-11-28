@@ -8,18 +8,24 @@ export interface ChRealtimeOptions {
   threadDebounceMs?: number;
 }
 
+export function isInteractionChange(method: string): boolean {
+  return (
+    method === "serverRequest/resolved" ||
+    method === "mcpServer/elicitation/request" ||
+    method === "item/tool/requestUserInput" ||
+    method === "codexhost/thread/questions/updated" ||
+    method.endsWith("/requestApproval")
+  );
+}
+
 function isUrgentThreadChange(method: string): boolean {
   return (
     method === "turn/started" ||
     method === "turn/completed" ||
     method === "thread/status/changed" ||
-    method === "serverRequest/resolved" ||
-    method === "mcpServer/elicitation/request" ||
-    method === "item/tool/requestUserInput" ||
-    method === "codexhost/thread/questions/updated" ||
     method === "codexhost/thread/configuration/updated" ||
     method === "nativeInteractionError" ||
-    method.endsWith("/requestApproval")
+    isInteractionChange(method)
   );
 }
 
@@ -40,6 +46,7 @@ export class ChRealtime {
     host: NonNullable<ChHostClient["realtime"]>,
     private readonly callbacks: {
       thread: (id: string) => Promise<unknown>;
+      interaction?: (id: string) => void | Promise<unknown>;
       usage: (id: string) => void;
       catalog: (reason?: "hello" | "changed") => Promise<void>;
       archived?: (id: string, archived: boolean) => void;
@@ -111,6 +118,12 @@ export class ChRealtime {
         this.schedule(
           event.threadId,
           isUrgentThreadChange(event.method) ? DEFAULT_DEBOUNCE_MS : this.threadDebounceMs,
+        );
+      } else if (this.online && isInteractionChange(event.method)) {
+        void Promise.resolve(this.callbacks.interaction?.(event.threadId)).catch(
+          (error: unknown) => {
+            this.callbacks.error(event.threadId, error);
+          },
         );
       }
       if (

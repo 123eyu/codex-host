@@ -21,14 +21,16 @@ import type {
 } from "@deepseek-ai/dsh-client-ui-conversation/client";
 import type { ChatSnapshot } from "../contract/snapshot.ts";
 
-/** Minimum top-level entry count required before content virtualization activates. */
+/** Minimum weighted item count required before content virtualization activates. */
 export const VIRTUALIZE_THRESHOLD = 48;
 /** Number of newest top-level entries permanently pinned at the transcript tail. */
 export const PIN_TAIL = 10;
-/** Idle timeout before releasing a temporary native-find full-mount lease. */
-export const FIND_LEASE_TIMEOUT_MS = 30_000;
-/** Hard duration ceiling for a temporary native-find full-mount lease. */
-export const FIND_LEASE_MAX_DURATION_MS = 180_000;
+/** Idle timeout before releasing a temporary native-find mount lease. */
+export const FIND_LEASE_TIMEOUT_MS = 15_000;
+/** Hard duration ceiling for a temporary native-find mount lease. */
+export const FIND_LEASE_MAX_DURATION_MS = 60_000;
+/** Maximum top-level rows mounted by a native-find lease (viewport window + pinned tail). */
+export const FIND_LEASE_MAX_MOUNTED_ROWS = 160;
 const OVERSCAN_MULTIPLIER = 1.5;
 const OVERSCAN_BUCKET_PX = 160;
 const MIN_OVERSCAN_PX = 320;
@@ -71,11 +73,120 @@ export interface SelectionFlowRange {
   readonly endKey: string;
 }
 
+/** Inclusive top-level index window mounted during a bounded native-find lease. */
+export interface FindLeaseWindow {
+  readonly start: number;
+  readonly end: number;
+}
+
+/**
+ * Compute the bounded non-tail index window mounted during an active native-find lease.
+ * Returns `null` when the entire transcript fits within `maxMountedRows` (by count, or
+ * by per-entry weights when `entryWeights` is supplied for grouped process rows).
+ */
+export function computeFindLeaseWindow(
+  entryCount: number,
+  centerIndex: number,
+  maxMountedRows = FIND_LEASE_MAX_MOUNTED_ROWS,
+  pinTail = PIN_TAIL,
+  entryWeights?: readonly number[],
+): FindLeaseWindow | null {
+  if (entryWeights === undefined || entryWeights.length !== entryCount) {
+    if (entryCount <= maxMountedRows) return null;
+    const effectiveTail = Math.min(Math.max(0, pinTail), entryCount);
+    const tailStart = entryCount - effectiveTail;
+    const windowBudget = Math.max(0, maxMountedRows - effectiveTail);
+    if (windowBudget === 0 || tailStart <= 0) {
+      return { start: tailStart, end: entryCount - 1 };
+    }
+    const clampedCenter = Math.max(0, Math.min(tailStart - 1, Math.trunc(centerIndex)));
+    const halfBefore = Math.floor(windowBudget / 2);
+    let start = Math.max(0, clampedCenter - halfBefore);
+    let end = start + windowBudget - 1;
+    if (end >= tailStart) {
+      end = tailStart - 1;
+      start = Math.max(0, end - windowBudget + 1);
+    }
+    return { start, end };
+  }
+
+  let totalWeight = 0;
+  for (let i = 0; i < entryCount; i += 1) {
+    totalWeight += Math.max(1, entryWeights[i] ?? 1);
+  }
+  if (totalWeight <= maxMountedRows) return null;
+
+  const effectiveTail = Math.min(Math.max(0, pinTail), entryCount);
+  const tailStart = entryCount - effectiveTail;
+  if (tailStart <= 0) {
+    return { start: 0, end: entryCount - 1 };
+  }
+
+  let tailWeight = 0;
+  for (let i = tailStart; i < entryCount; i += 1) {
+    tailWeight += Math.max(1, entryWeights[i] ?? 1);
+  }
+  const windowBudget = Math.max(1, maxMountedRows - tailWeight);
+  const clampedCenter = Math.max(0, Math.min(tailStart - 1, Math.trunc(centerIndex)));
+  let start = clampedCenter;
+  let end = clampedCenter;
+  let usedWeight = Math.max(1, entryWeights[clampedCenter] ?? 1);
+
+  while (start > 0 || end < tailStart - 1) {
+    let expanded = false;
+    if (start > 0) {
+      const nextWeight = Math.max(1, entryWeights[start - 1] ?? 1);
+      if (usedWeight + nextWeight <= windowBudget) {
+        start -= 1;
+        usedWeight += nextWeight;
+        expanded = true;
+      }
+    }
+    if (end < tailStart - 1) {
+      const nextWeight = Math.max(1, entryWeights[end + 1] ?? 1);
+      if (usedWeight + nextWeight <= windowBudget) {
+        end += 1;
+        usedWeight += nextWeight;
+        expanded = true;
+      }
+    }
+    if (!expanded) break;
+  }
+  return { start, end };
+}
+
+function entryWeightOf(entry: RenderEntry, groupedView?: GroupedChatLookup): number {
+  if (entry.kind !== "group" || groupedView === undefined) return 1;
+  const memberCount = groupedView.groupSource(entry.key).getSnapshot()?.members.length ?? 0;
+  return Math.max(1, memberCount);
+}
+
+/**
+ * Decide whether transcript content virtualization should activate.
+ * Activates above {@link VIRTUALIZE_THRESHOLD} top-level entries, or when there
+ * are non-tail entries and weighted group member counts exceed the threshold.
+ */
+export function shouldActivateVirtualization(
+  entries: readonly RenderEntry[],
+  groupedView?: GroupedChatLookup,
+): boolean {
+  if (entries.length > VIRTUALIZE_THRESHOLD) return true;
+  if (entries.length <= PIN_TAIL || groupedView === undefined) return false;
+  let weight = 0;
+  for (const entry of entries) {
+    weight += entryWeightOf(entry, groupedView);
+    if (weight > VIRTUALIZE_THRESHOLD) return true;
+  }
+  return false;
+}
+
 /** Inputs consumed by {@link useTranscriptVirtualization}. */
 export interface TranscriptVirtualizationInput {
   readonly sessionId: string;
   readonly entries: readonly RenderEntry[];
   readonly nodeStore: ChatSnapshot["nodes"];
+  /** Optional grouped view used to weight large process groups against {@link VIRTUALIZE_THRESHOLD}. */
+  readonly groupedView?: GroupedChatLookup | undefined;
   readonly listRef: RefObject<HTMLElement | null>;
   readonly columnRef: RefObject<HTMLElement | null>;
   /** Flow key of the user message currently being edited inline. */
@@ -92,6 +203,8 @@ export interface TranscriptVirtualizationInput {
   readonly findLeaseTimeoutMs?: number;
   /** Override maximum hard duration for the native-find lease (defaults to {@link FIND_LEASE_MAX_DURATION_MS}). */
   readonly findLeaseMaxDurationMs?: number;
+  /** Override maximum top-level rows mounted by a native-find lease (defaults to {@link FIND_LEASE_MAX_MOUNTED_ROWS}). */
+  readonly findLeaseMaxMountedRows?: number;
   /** Override IntersectionObserver rootMargin (defaults to 1.5x `root.clientHeight` in px). */
   readonly overscanMargin?: string;
   /** Invoked synchronously after commit when virtualization while tail-following clamps `scrollTop`. */
@@ -102,9 +215,9 @@ export interface TranscriptVirtualizationInput {
 
 /** Per-render virtualization handle consumed by `ChatView` and `ChatNodeList`. */
 export interface TranscriptVirtualization {
-  /** Whether virtualization observers/hooks are active (`entries.length > 48` with IO support). */
+  /** Whether virtualization observers/hooks are active with IO support. */
   readonly active: boolean;
-  /** Whether a temporary native-find full-mount lease is currently held. */
+  /** Whether a temporary native-find mount lease is currently held. */
   readonly findLeaseActive: boolean;
   /** Whether the top-level entry at `index` should render its content subtree. */
   readonly isMounted: (index: number, flowKey: string) => boolean;
@@ -460,6 +573,7 @@ export function useTranscriptVirtualization({
   sessionId,
   entries,
   nodeStore,
+  groupedView,
   listRef,
   columnRef,
   editingFlowKey = null,
@@ -469,12 +583,13 @@ export function useTranscriptVirtualization({
   busyTurn = null,
   findLeaseTimeoutMs = FIND_LEASE_TIMEOUT_MS,
   findLeaseMaxDurationMs = FIND_LEASE_MAX_DURATION_MS,
+  findLeaseMaxMountedRows = FIND_LEASE_MAX_MOUNTED_ROWS,
   overscanMargin,
   onTailScrollClamp,
   onScrollCompensated,
 }: TranscriptVirtualizationInput): TranscriptVirtualization {
   const hasIntersectionObserver = typeof IntersectionObserver !== "undefined";
-  const enabled = entries.length > VIRTUALIZE_THRESHOLD && hasIntersectionObserver;
+  const enabled = hasIntersectionObserver && shouldActivateVirtualization(entries, groupedView);
 
   const sessionRef = useRef(sessionId);
   const heightsRef = useRef<Map<string, number>>(new Map());
@@ -932,17 +1047,75 @@ export function useTranscriptVirtualization({
     return start <= end ? { start, end } : { start: end, end: start };
   }, [flowKeyToIndex, selectionRange]);
 
-  const virtualizing = enabled && ioSettled && !findLeaseActive;
+  const findWindow = useMemo<FindLeaseWindow | null>(() => {
+    if (!findLeaseActive) return null;
+    const entryWeights =
+      groupedView !== undefined
+        ? entries.map((entry) => entryWeightOf(entry, groupedView))
+        : undefined;
+    if (entryWeights === undefined && entries.length <= findLeaseMaxMountedRows) return null;
+    let centerIndex: number | null = null;
+    if (visibleKeys.size > 0) {
+      let minVis = Number.POSITIVE_INFINITY;
+      let maxVis = -1;
+      for (const key of visibleKeys) {
+        const idx = flowKeyToIndex.get(key);
+        if (idx !== undefined) {
+          if (idx < minVis) minVis = idx;
+          if (idx > maxVis) maxVis = idx;
+        }
+      }
+      if (maxVis >= 0 && Number.isFinite(minVis)) {
+        centerIndex = Math.floor((minVis + maxVis) / 2);
+      }
+    }
+    if (centerIndex === null) {
+      const fallbackKey =
+        focusedFlowKey ??
+        (navigationPin?.anchorKey != null ? flowKeyForScrollAnchor(navigationPin.anchorKey) : null);
+      centerIndex =
+        fallbackKey !== null
+          ? (flowKeyToIndex.get(fallbackKey) ?? entries.length - 1)
+          : entries.length - 1;
+    }
+    return computeFindLeaseWindow(
+      entries.length,
+      centerIndex,
+      findLeaseMaxMountedRows,
+      PIN_TAIL,
+      entryWeights,
+    );
+  }, [
+    entries,
+    findLeaseActive,
+    findLeaseMaxMountedRows,
+    flowKeyToIndex,
+    focusedFlowKey,
+    groupedView,
+    navigationPin?.anchorKey,
+    visibleKeys,
+  ]);
+
+  const fullMountFindLease = findLeaseActive && findWindow === null;
+  const virtualizing = enabled && ioSettled && !fullMountFindLease;
   const tailStartIndex = Math.max(0, entries.length - PIN_TAIL);
   const activeVisibleKeys = virtualizing ? visibleKeys : null;
   const activePinnedKeys = virtualizing ? pinnedKeys : null;
   const activeSelectionBounds = virtualizing ? selectionBounds : null;
+  const activeFindWindow = virtualizing ? findWindow : null;
   const activeTailStartIndex = virtualizing ? tailStartIndex : 0;
 
   const isMounted = useCallback(
     (index: number, flowKey: string): boolean => {
       if (!virtualizing) return true;
       if (index >= activeTailStartIndex) return true;
+      if (
+        activeFindWindow !== null &&
+        index >= activeFindWindow.start &&
+        index <= activeFindWindow.end
+      ) {
+        return true;
+      }
       if (activeVisibleKeys !== null && activeVisibleKeys.has(flowKey)) return true;
       if (activePinnedKeys !== null && activePinnedKeys.has(flowKey)) return true;
       if (
@@ -954,6 +1127,7 @@ export function useTranscriptVirtualization({
       return false;
     },
     [
+      activeFindWindow,
       activePinnedKeys,
       activeSelectionBounds,
       activeTailStartIndex,

@@ -175,6 +175,7 @@ export interface RemotePeerProvider {
   nodeIdForHostId?(hostId: string): string | undefined;
   waitForInitialConnection?(hostId: string): Promise<void>;
   onThreadChanged?: (hostId: string, threadId: string) => unknown;
+  onThreadInteraction?: (hostId: string, threadId: string) => unknown;
   onThreadConfigurationChanged?: (hostId: string, threadId: string) => void;
   onUsageChanged?: (hostId: string, threadId: string) => void;
   onCatalogInspectionChanged?: (hostId: string) => void;
@@ -238,6 +239,10 @@ export class RemoteSessions {
     string,
     { realtime: NonNullable<PeerThreadSource["host"]["realtime"]>; interactions: ChInteractions }
   >();
+  private readonly peerInteractionReads = new Map<
+    string,
+    { dirty: boolean; cancelled: boolean; promise: Promise<void> }
+  >();
   private readonly followLifetime = new AbortController();
   /** When a periodic check first found each view without a follower. */
   private readonly unfollowedSince = new WeakMap<ChThreadView, number>();
@@ -254,6 +259,7 @@ export class RemoteSessions {
   private readonly idleViewTimer: NodeJS.Timeout;
   private readonly peerHandlers: {
     onThreadChanged: (hostId: string, threadId: string) => Promise<void>;
+    onThreadInteraction: (hostId: string, threadId: string) => Promise<void>;
     onThreadConfigurationChanged: (hostId: string, threadId: string) => void;
     onUsageChanged: (hostId: string, threadId: string) => void;
     onCatalogInspectionChanged: (hostId: string) => void;
@@ -279,6 +285,8 @@ export class RemoteSessions {
   ) {
     this.peerHandlers = {
       onThreadChanged: (hostId, threadId) => this.handlePeerThreadChanged(hostId, threadId),
+      onThreadInteraction: (hostId, threadId) =>
+        this.handlePeerInteractionChanged(hostId, threadId),
       onThreadConfigurationChanged: (hostId, threadId) =>
         this.handlePeerConfigurationChanged(hostId, threadId),
       onUsageChanged: (hostId, threadId) => this.handlePeerUsageChanged(hostId, threadId),
@@ -289,6 +297,7 @@ export class RemoteSessions {
     };
     if (peers) {
       peers.onThreadChanged ??= this.peerHandlers.onThreadChanged;
+      peers.onThreadInteraction ??= this.peerHandlers.onThreadInteraction;
       peers.onThreadConfigurationChanged ??= this.peerHandlers.onThreadConfigurationChanged;
       peers.onUsageChanged ??= this.peerHandlers.onUsageChanged;
       peers.onCatalogInspectionChanged ??= this.peerHandlers.onCatalogInspectionChanged;
@@ -336,6 +345,65 @@ export class RemoteSessions {
       }
       throw error;
     }
+  }
+  /** Reconcile pending interactions for an unwatched Peer Thread via a bounded snapshot without reading full history. */
+  private handlePeerInteractionChanged(hostId: string, threadId: string): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    const source = this.peers?.source(hostId);
+    if (!source) return Promise.resolve();
+    const id = remoteSessionId(hostId, threadId);
+    const active = this.peerInteractionReads.get(id);
+    if (active) {
+      active.dirty = true;
+      return active.promise;
+    }
+    const state = { dirty: true, cancelled: false, promise: Promise.resolve() };
+    this.peerInteractionReads.set(id, state);
+    state.promise = (async () => {
+      try {
+        while (state.dirty && !state.cancelled && !this.closed) {
+          state.dirty = false;
+          const currentSource = this.peers?.source(hostId);
+          if (!currentSource) return;
+          const host = this.hosts.get(hostId);
+          if (host && !host.online) return;
+          const startResetRevision = this.peerResetRevisions.get(hostId) ?? 0;
+          const entry = this.entries.get(id);
+          if (entry && !entry.online) return;
+          const expectedEpoch = entry?.epoch ?? host?.epoch;
+          let snapshot;
+          try {
+            snapshot = await currentSource.host.realtime.snapshot(threadId, {
+              truncateToolOutput: true,
+            });
+          } catch {
+            return;
+          }
+          if (
+            state.cancelled ||
+            this.closed ||
+            this.peers?.source(hostId) !== currentSource ||
+            this.hosts.get(hostId)?.online === false
+          ) {
+            return;
+          }
+          const latestEntry = this.entries.get(id);
+          if (latestEntry && !latestEntry.online) return;
+          if (
+            (this.peerResetRevisions.get(hostId) ?? 0) !== startResetRevision ||
+            (expectedEpoch && snapshot.cursor.epoch !== expectedEpoch)
+          ) {
+            continue;
+          }
+          this.interactionsForPeer(hostId, currentSource).update(snapshot, id);
+        }
+      } finally {
+        if (this.peerInteractionReads.get(id) === state) {
+          this.peerInteractionReads.delete(id);
+        }
+      }
+    })();
+    return state.promise;
   }
   private handlePeerConfigurationChanged(hostId: string, threadId: string): void {
     if (this.closed) return;
@@ -1427,6 +1495,13 @@ export class RemoteSessions {
         if (summaryChanged) {
           this.events.emit("api-session/added", nextSummary);
         }
+        if (
+          current.row.status.type !== "active" &&
+          !current.view &&
+          this.peerInteractions.get(host.hostId)?.interactions.hasPending(id)
+        ) {
+          void this.handlePeerInteractionChanged(host.hostId, current.identity.threadId);
+        }
       }
       if (pinRevision === this.pinRevision) {
         this.peerPinnedIds.set(host.hostId, [...listed.pinnedIds]);
@@ -1935,6 +2010,12 @@ export class RemoteSessions {
       } catch {
         hostId = undefined;
       }
+    }
+    const activeRead = this.peerInteractionReads.get(id);
+    if (activeRead) {
+      activeRead.cancelled = true;
+      activeRead.dirty = false;
+      this.peerInteractionReads.delete(id);
     }
     if (hostId) this.peerInteractions.get(hostId)?.interactions.clearSession(id);
   }
@@ -3567,6 +3648,8 @@ export class RemoteSessions {
     if (this.peers) {
       if (this.peers.onThreadChanged === this.peerHandlers.onThreadChanged)
         delete this.peers.onThreadChanged;
+      if (this.peers.onThreadInteraction === this.peerHandlers.onThreadInteraction)
+        delete this.peers.onThreadInteraction;
       if (
         this.peers.onThreadConfigurationChanged === this.peerHandlers.onThreadConfigurationChanged
       )
@@ -3584,6 +3667,11 @@ export class RemoteSessions {
     for (const id of this.entries.keys()) this.clearPending(id);
     for (const peer of this.peerInteractions.values()) peer.interactions.clear();
     this.peerInteractions.clear();
+    for (const active of this.peerInteractionReads.values()) {
+      active.cancelled = true;
+      active.dirty = false;
+    }
+    this.peerInteractionReads.clear();
     for (const entry of this.entries.values()) entry.view?.log.reconnectFollowers();
     this.peerArchivedIds.clear();
     this.peerPinnedIds.clear();

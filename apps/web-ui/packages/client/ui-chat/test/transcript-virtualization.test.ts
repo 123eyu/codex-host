@@ -22,16 +22,20 @@ import { ChatViewport } from "../src/client/chat/use-chat-viewport.ts";
 import {
   ESTIMATED_NODE_HEIGHT,
   FIND_LEASE_MAX_DURATION_MS,
+  FIND_LEASE_MAX_MOUNTED_ROWS,
   FIND_LEASE_TIMEOUT_MS,
   PIN_TAIL,
   VIRTUALIZE_OVERSCAN_MARGIN,
   VIRTUALIZE_THRESHOLD,
+  computeFindLeaseWindow,
   computeOverscanMargin,
   entryFlowKey,
   flowKeyForAnswerKey,
   resolveRevealTargetFlowKey,
   resolveSelectionFlowRange,
+  shouldActivateVirtualization,
   useTranscriptVirtualization,
+  type GroupedChatLookup,
   type NavigationPinTarget,
   type TranscriptVirtualization,
 } from "../src/client/chat/use-transcript-virtualization.ts";
@@ -292,6 +296,7 @@ interface HarnessProps {
   busyTurn?: number | null;
   findLeaseTimeoutMs?: number;
   findLeaseMaxDurationMs?: number;
+  findLeaseMaxMountedRows?: number;
   overscanMargin?: string;
   withConversationScroll?: boolean;
   followingTail?: boolean;
@@ -313,6 +318,7 @@ function VirtualizedTranscriptHarness({
   busyTurn = null,
   findLeaseTimeoutMs,
   findLeaseMaxDurationMs,
+  findLeaseMaxMountedRows,
   overscanMargin,
   withConversationScroll = true,
   followingTail = false,
@@ -327,11 +333,20 @@ function VirtualizedTranscriptHarness({
     groups,
     foldCompletedTurns,
   });
+  const groupedView: GroupedChatLookup | undefined =
+    groups === undefined
+      ? undefined
+      : {
+          groupSource: (key) => ({
+            getSnapshot: () => groups.get(key),
+          }),
+        };
 
   const virtualization = useTranscriptVirtualization({
     sessionId,
     entries,
     nodeStore,
+    groupedView,
     listRef,
     columnRef,
     editingFlowKey,
@@ -340,6 +355,7 @@ function VirtualizedTranscriptHarness({
     busyTurn,
     findLeaseTimeoutMs,
     findLeaseMaxDurationMs,
+    findLeaseMaxMountedRows,
     overscanMargin,
     onTailScrollClamp,
     onScrollCompensated,
@@ -814,19 +830,19 @@ describe("transcript row-shell content virtualization and find lease", () => {
     expect(handle.findLeaseActive).toBe(true);
     expect(container.querySelectorAll("[data-rendered-body]")).toHaveLength(total);
 
-    // Activity on find-navigation keys (e.g. non-editable Enter, Cmd+G, F3) extends the 30s timer.
+    // Activity on find-navigation keys (e.g. non-editable Enter, Cmd+G, F3) extends the idle timer.
     await act(async () => {
-      vi.advanceTimersByTime(20_000);
+      vi.advanceTimersByTime(FIND_LEASE_TIMEOUT_MS - 5_000);
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-      vi.advanceTimersByTime(20_000);
+      vi.advanceTimersByTime(FIND_LEASE_TIMEOUT_MS - 5_000);
     });
     expect(handle.findLeaseActive).toBe(true);
 
     // Ordinary non-find keystrokes must NOT indefinitely extend the lease.
     await act(async () => {
-      vi.advanceTimersByTime(15_000);
+      vi.advanceTimersByTime(Math.floor(FIND_LEASE_TIMEOUT_MS / 2));
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
-      vi.advanceTimersByTime(16_000);
+      vi.advanceTimersByTime(Math.ceil(FIND_LEASE_TIMEOUT_MS / 2) + 1_000);
     });
     expect(handle.findLeaseActive).toBe(false);
     expect(container.querySelectorAll("[data-rendered-body]")).toHaveLength(PIN_TAIL);
@@ -895,7 +911,7 @@ describe("transcript row-shell content virtualization and find lease", () => {
           sessionId: "s-find-renew",
           entries,
           nodes,
-          findLeaseMaxDurationMs: 75_000,
+          findLeaseMaxDurationMs: 35_000,
           onHandle: (h) => {
             handle = h;
           },
@@ -920,12 +936,12 @@ describe("transcript row-shell content virtualization and find lease", () => {
     });
     expect(handle.findLeaseActive).toBe(true);
 
-    // Passive scroll on the scrollport extends the 30s idle window.
+    // Passive scroll on the scrollport extends the idle window.
     const scroller = container.querySelector<HTMLElement>("[data-conversation-scroll]")!;
     await act(async () => {
-      vi.advanceTimersByTime(25_000);
+      vi.advanceTimersByTime(12_000);
       scroller.dispatchEvent(new Event("scroll"));
-      vi.advanceTimersByTime(20_000);
+      vi.advanceTimersByTime(10_000);
     });
     expect(handle.findLeaseActive).toBe(true);
 
@@ -938,18 +954,20 @@ describe("transcript row-shell content virtualization and find lease", () => {
     selection.removeAllRanges();
     selection.addRange(range);
     await act(async () => {
-      vi.advanceTimersByTime(20_000);
+      vi.advanceTimersByTime(8_000);
       document.dispatchEvent(new Event("selectionchange"));
-      vi.advanceTimersByTime(5_000);
+      vi.advanceTimersByTime(3_000);
     });
     expect(handle.findLeaseActive).toBe(true);
 
-    // Hard duration ceiling (75s from Cmd+F; 70s elapsed so far) terminates sliding renewals.
+    // Hard duration ceiling (35s from Cmd+F; 33s elapsed so far) terminates sliding renewals.
     await act(async () => {
-      vi.advanceTimersByTime(6_000);
+      vi.advanceTimersByTime(3_000);
     });
     expect(handle.findLeaseActive).toBe(false);
-    expect(FIND_LEASE_MAX_DURATION_MS).toBe(180_000);
+    expect(FIND_LEASE_TIMEOUT_MS).toBe(15_000);
+    expect(FIND_LEASE_MAX_DURATION_MS).toBe(60_000);
+    expect(FIND_LEASE_MAX_MOUNTED_ROWS).toBe(160);
     selection.removeAllRanges();
 
     // Dropping below VIRTUALIZE_THRESHOLD while find lease is active resets findLeaseState.
@@ -1805,5 +1823,310 @@ describe("transcript row-shell content virtualization and find lease", () => {
     // Pure clamp recovery (batch 2) must NOT report +600; combined clamp + 25px growth (batch 4)
     // must report only the +25px net height shift, keeping ChatViewport.observation.top unpolluted.
     expect(compensatedDeltas).toEqual([25]);
+  });
+
+  it("bounds Cmd+F mount blast radius to a sliding viewport window + tail on huge transcripts", async () => {
+    expect(computeFindLeaseWindow(160, 40, 160, 10)).toBeNull();
+    expect(computeFindLeaseWindow(500, 499, 160, 10)).toEqual({ start: 340, end: 489 });
+    expect(computeFindLeaseWindow(500, 200, 160, 10)).toEqual({ start: 125, end: 274 });
+    expect(computeFindLeaseWindow(500, 10, 160, 10)).toEqual({ start: 0, end: 149 });
+
+    const total = 220;
+    const { entries, nodes } = buildEntries(total);
+    let handle!: TranscriptVirtualization;
+
+    await act(async () => {
+      root.render(
+        createElement(VirtualizedTranscriptHarness, {
+          sessionId: "s-find-bounded",
+          entries,
+          nodes,
+          onHandle: (h) => {
+            handle = h;
+          },
+        }),
+      );
+    });
+
+    const io = findVirtualizationIO(mockIO.instances)!;
+    const row20 = container.querySelector<HTMLElement>('[data-chat-flow-key="node-20"]')!;
+    const row190 = container.querySelector<HTMLElement>('[data-chat-flow-key="node-190"]')!;
+
+    // Settle IO around row 20.
+    await act(async () => {
+      io.emit([{ target: row20, isIntersecting: true }]);
+    });
+    expect(container.querySelectorAll("[data-rendered-body]")).toHaveLength(PIN_TAIL + 1);
+
+    // Pressing Cmd+F mounts a bounded 150-row window around row 20 (0..149) + 10 tail rows (210..219) = 160 rows.
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "f", metaKey: true, bubbles: true }),
+      );
+    });
+    expect(handle.findLeaseActive).toBe(true);
+    expect(container.querySelectorAll("[data-rendered-body]")).toHaveLength(
+      FIND_LEASE_MAX_MOUNTED_ROWS,
+    );
+    expect(
+      container.querySelector('[data-chat-flow-key="node-0"] [data-rendered-body]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-chat-flow-key="node-149"] [data-rendered-body]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-chat-flow-key="node-150"] [data-rendered-body]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-chat-flow-key="node-210"] [data-rendered-body]'),
+    ).not.toBeNull();
+
+    // Moving the viewport down to row 190 slides the bounded window while keeping the mounted cap.
+    await act(async () => {
+      io.emit([
+        { target: row20, isIntersecting: false },
+        { target: row190, isIntersecting: true },
+      ]);
+    });
+    expect(container.querySelectorAll("[data-rendered-body]")).toHaveLength(
+      FIND_LEASE_MAX_MOUNTED_ROWS,
+    );
+    expect(
+      container.querySelector('[data-chat-flow-key="node-0"] [data-rendered-body]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-chat-flow-key="node-190"] [data-rendered-body]'),
+    ).not.toBeNull();
+
+    // Escape releases the bounded find lease back to normal virtualization.
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(handle.findLeaseActive).toBe(false);
+    expect(container.querySelectorAll("[data-rendered-body]")).toHaveLength(PIN_TAIL + 1);
+  });
+
+  it("activates virtualization below VIRTUALIZE_THRESHOLD top-level rows when heavy process groups exceed weighted threshold", async () => {
+    const nodes = new Map<string, ChatConversationViewNode>();
+    const groups = new Map<string, GroupSnapshot<ProcessGroupData>>();
+    const entries: RenderEntry[] = [];
+
+    // 14 top-level rows (above PIN_TAIL=10, below VIRTUALIZE_THRESHOLD=48): 4 heavy groups of 12 members + 10 plain nodes = weight 58.
+    let nodeIdx = 0;
+    for (let g = 0; g < 4; g += 1) {
+      const groupKey = `group-heavy-${g}` as GroupKey;
+      const members: Array<{ kind: "node"; key: NodeKey }> = [];
+      for (let m = 0; m < 12; m += 1) {
+        const key = `heavy-member-${g}-${m}` as NodeKey;
+        nodes.set(key, makeAssistantProcessNode(key, g + 1, nodeIdx + 1, m + 1));
+        members.push({ kind: "node", key });
+        nodeIdx += 1;
+      }
+      groups.set(groupKey, {
+        key: groupKey,
+        members,
+        data: { turn: g + 1, closed: true, summary: { counts: [] } },
+      });
+      entries.push({ kind: "group", key: groupKey });
+    }
+    for (let i = 0; i < 10; i += 1) {
+      const node = makeUserNode(100 + i, 10 + i);
+      nodes.set(node.key, node);
+      entries.push({ kind: "node", key: node.key as NodeKey });
+    }
+
+    const groupedView: GroupedChatLookup = {
+      groupSource: (key) => ({ getSnapshot: () => groups.get(key) }),
+    };
+    expect(entries.length).toBeLessThan(VIRTUALIZE_THRESHOLD);
+    expect(shouldActivateVirtualization(entries, groupedView)).toBe(true);
+    // Transcripts with <= PIN_TAIL top-level entries stay unvirtualized even with a large group.
+    expect(shouldActivateVirtualization(entries.slice(0, 4), groupedView)).toBe(false);
+
+    let handle!: TranscriptVirtualization;
+    await act(async () => {
+      root.render(
+        createElement(VirtualizedTranscriptHarness, {
+          sessionId: "s-weighted-groups",
+          entries,
+          nodes,
+          groups,
+          onHandle: (h) => {
+            handle = h;
+          },
+        }),
+      );
+    });
+
+    expect(handle.active).toBe(true);
+    const io = findVirtualizationIO(mockIO.instances)!;
+    const group0 = container.querySelector<HTMLElement>('[data-chat-flow-key="group-heavy-0"]')!;
+    await act(async () => {
+      io.emit([{ target: group0, isIntersecting: false }]);
+    });
+    expect(group0.hasAttribute("data-chat-virtualized")).toBe(true);
+    expect(group0.querySelector("[data-rendered-body]")).toBeNull();
+  });
+
+  it("shares one MutationObserver across ChatNodeSeat rows and skips DOM writes on unrelated re-renders", async () => {
+    const OriginalMO = globalThis.MutationObserver;
+    let observerConstructions = 0;
+    let disconnectCount = 0;
+    class CountingMutationObserver extends OriginalMO {
+      constructor(callback: MutationCallback) {
+        super(callback);
+        observerConstructions += 1;
+      }
+      override disconnect(): void {
+        disconnectCount += 1;
+        super.disconnect();
+      }
+    }
+    globalThis.MutationObserver = CountingMutationObserver as typeof MutationObserver;
+
+    const localDoc = document.implementation.createHTMLDocument("seat-observer-test");
+    const host = localDoc.createElement("div");
+    localDoc.body.appendChild(host);
+    const localRoot = createRoot(host);
+
+    try {
+      const { entries, nodes } = buildEntries(6);
+      const { seatProps } = createFakeSeatEnvironment(nodes);
+      const renderRows = (cwd: string) =>
+        createElement(
+          "div",
+          null,
+          entries.map((entry) =>
+            createElement(ChatNodeSeat, {
+              ...seatProps,
+              cwd,
+              key: entry.key,
+              nodeKey: entry.key,
+              renderSlot: (() =>
+                createElement(
+                  "div",
+                  { "data-slot": "conversation.chat.node" },
+                  createElement("span", null, entry.key),
+                )) as unknown as ChatViewSlotProps["renderSlot"],
+            }),
+          ),
+        );
+
+      await act(async () => {
+        localRoot.render(renderRows("/workspace-a"));
+      });
+      expect(observerConstructions).toBe(1);
+
+      const firstWrapper = host.querySelector<HTMLElement>('[data-chat-flow-key="node-0"]')!;
+      const setAttrSpy = vi.spyOn(firstWrapper, "setAttribute");
+      const removeAttrSpy = vi.spyOn(firstWrapper, "removeAttribute");
+
+      // Unrelated prop change re-renders ChatNodeSeat without touching data-chat-empty.
+      await act(async () => {
+        localRoot.render(renderRows("/workspace-b"));
+      });
+      expect(setAttrSpy).not.toHaveBeenCalledWith("data-chat-empty", expect.anything());
+      expect(removeAttrSpy).not.toHaveBeenCalledWith("data-chat-empty");
+      expect(observerConstructions).toBe(1);
+
+      await act(async () => {
+        localRoot.unmount();
+      });
+      expect(disconnectCount).toBe(1);
+    } finally {
+      host.remove();
+      globalThis.MutationObserver = OriginalMO;
+    }
+  });
+
+  it("preserves pending slot mutations on surviving seats when shared MutationObserver compacts in the same commit", async () => {
+    const OriginalMO = globalThis.MutationObserver;
+    let disconnectCount = 0;
+    let takeRecordsCount = 0;
+    class TrackingMutationObserver extends OriginalMO {
+      override takeRecords(): MutationRecord[] {
+        takeRecordsCount += 1;
+        return super.takeRecords();
+      }
+      override disconnect(): void {
+        disconnectCount += 1;
+        super.disconnect();
+      }
+    }
+    globalThis.MutationObserver = TrackingMutationObserver as typeof MutationObserver;
+
+    const localDoc = document.implementation.createHTMLDocument("seat-compact-test");
+    const host = localDoc.createElement("div");
+    localDoc.body.appendChild(host);
+    const localRoot = createRoot(host);
+
+    try {
+      // 66 seats x 2 observed nodes (wrapper + slot) = 132 > SEAT_OBSERVER_COMPACT_MIN_OBSERVED (128).
+      const { entries, nodes } = buildEntries(66);
+      const { seatProps } = createFakeSeatEnvironment(nodes);
+      const renderRows = (count: number, firstPopulated: boolean) =>
+        createElement(
+          "div",
+          null,
+          entries.slice(0, count).map((entry, idx) =>
+            createElement(ChatNodeSeat, {
+              ...seatProps,
+              key: entry.key,
+              nodeKey: entry.key,
+              renderSlot: (() =>
+                createElement(
+                  "div",
+                  { "data-slot": "conversation.chat.node" },
+                  idx === 0 && !firstPopulated ? null : createElement("span", null, entry.key),
+                )) as unknown as ChatViewSlotProps["renderSlot"],
+            }),
+          ),
+        );
+
+      await act(async () => {
+        localRoot.render(renderRows(66, false));
+      });
+      const survivingWrapper = host.querySelector<HTMLElement>('[data-chat-flow-key="node-0"]')!;
+      expect(survivingWrapper.hasAttribute("data-chat-empty")).toBe(true);
+      expect(disconnectCount).toBe(0);
+
+      // In a single commit, unmount 65 seats (coalescing compaction to a single microtask)
+      // while mutating the surviving seat's slot from empty to populated.
+      await act(async () => {
+        localRoot.render(renderRows(1, true));
+      });
+      expect(disconnectCount).toBe(1);
+      expect(takeRecordsCount).toBe(1);
+      expect(survivingWrapper.hasAttribute("data-chat-empty")).toBe(false);
+
+      // Subsequent slot mutations on the surviving seat remain observed after compaction.
+      await act(async () => {
+        localRoot.render(renderRows(1, false));
+      });
+      expect(survivingWrapper.hasAttribute("data-chat-empty")).toBe(true);
+
+      await act(async () => {
+        localRoot.unmount();
+      });
+    } finally {
+      host.remove();
+      globalThis.MutationObserver = OriginalMO;
+    }
+  });
+
+  it("bounds find-lease window by weighted process-group member count when top-level entries are <= 160", () => {
+    // 80 top-level rows, each weighing 4 members (total weight = 320 > 160).
+    const weights = Array.from({ length: 80 }, () => 4);
+    const win = computeFindLeaseWindow(80, 40, 160, 10, weights);
+    expect(win).not.toBeNull();
+    // Tail (10 entries x 4 = 40 weight) leaves 120 weight budget = 30 non-tail entries around center 40.
+    expect(win!.end - win!.start + 1).toBe(30);
+    expect(win!.start).toBeLessThanOrEqual(40);
+    expect(win!.end).toBeGreaterThanOrEqual(40);
+    expect(win!.end).toBeLessThan(70);
+
+    // When total weight fits within maxMountedRows, still returns null (full mount).
+    const lightWeights = Array.from({ length: 80 }, () => 2);
+    expect(computeFindLeaseWindow(80, 40, 160, 10, lightWeights)).toBeNull();
   });
 });

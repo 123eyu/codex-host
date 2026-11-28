@@ -60,6 +60,7 @@ export class PeerHostManager {
   onChange?: (hostId?: string) => void;
   onPeerRemoved?: (hostId: string) => void;
   onThreadChanged?: (hostId: string, threadId: string) => unknown;
+  onThreadInteraction?: (hostId: string, threadId: string) => unknown;
   onThreadConfigurationChanged?: (hostId: string, threadId: string) => void;
   onUsageChanged?: (hostId: string, threadId: string) => void;
   onCatalogInspectionChanged?: (hostId: string) => void;
@@ -125,6 +126,7 @@ export class PeerHostManager {
         host,
         onCatalogChanged: () => this.onChange?.(next.hostId),
         onThreadChanged: (threadId) => this.onThreadChanged?.(next.hostId, threadId),
+        onThreadInteraction: (threadId) => this.onThreadInteraction?.(next.hostId, threadId),
         onThreadConfigurationChanged: (threadId) =>
           this.onThreadConfigurationChanged?.(next.hostId, threadId),
         onUsageChanged: (threadId) => this.onUsageChanged?.(next.hostId, threadId),

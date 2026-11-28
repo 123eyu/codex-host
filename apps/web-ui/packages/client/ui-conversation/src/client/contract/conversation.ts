@@ -188,7 +188,10 @@ export interface ConversationContextReader {
   previous<State>(kind: string): ConversationPreviousContext<State> | undefined;
 }
 
-/** Requested cadence; `animation-frame` materializes after three browser animation frames. */
+/**
+ * Requested cadence; `animation-frame` coalesces updates over a 40ms window aligned to a
+ * single browser animation frame when visible, and defers flushes while the window is hidden.
+ */
 export type ConversationPublication = "none" | "animation-frame" | "immediate";
 
 /** Engine-owned Location data publication phase. */

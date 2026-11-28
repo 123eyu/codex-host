@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ImageAttachmentRef } from "@deepseek-ai/dsh-attachment";
 import {
   IconLoadingOutlineRegular,
@@ -159,6 +159,19 @@ export function MessageImage({
   }, [attachment, load, attempt]);
 
   const src = preview?.url ?? loaded;
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const srcRef = useRef<string | null>(src);
+  srcRef.current = src;
+  const attachImgRef = useCallback((node: HTMLImageElement | null) => {
+    const prev = imgRef.current;
+    imgRef.current = node;
+    if (prev !== null && prev !== node) {
+      prev.removeAttribute("src");
+    }
+    if (node !== null && !node.hasAttribute("src") && srcRef.current !== null) {
+      node.src = srcRef.current;
+    }
+  }, []);
   const label =
     ("attachment" in image ? image.label : undefined) ??
     preview?.name ??
@@ -214,9 +227,13 @@ export function MessageImage({
           </span>
         ) : (
           <img
+            ref={attachImgRef}
             src={src}
             alt={label}
+            loading="lazy"
+            decoding="async"
             onLoad={(event) => {
+              if (imgRef.current !== event.currentTarget) return;
               const { naturalWidth: width, naturalHeight: height } = event.currentTarget;
               if (width > 0 && height > 0)
                 setNatural((previous) =>
@@ -225,7 +242,10 @@ export function MessageImage({
                     : { width, height },
                 );
             }}
-            onError={() => setError("unavailable")}
+            onError={(event) => {
+              if (imgRef.current !== event.currentTarget) return;
+              setError("unavailable");
+            }}
             style={fit === undefined ? undefined : { objectPosition: fit.objectPosition }}
           />
         )}

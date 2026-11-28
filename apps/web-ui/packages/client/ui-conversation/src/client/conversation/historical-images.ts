@@ -5,14 +5,18 @@ import type { ISessions } from "@deepseek-ai/dsh-api-session-controller/client";
 import type { SessionId } from "@deepseek-ai/dsh-session/types";
 import { bytesToBase64 } from "@deepseek-ai/dsh-util-crypto";
 
-const DEFAULT_MAX_ENTRIES = 32;
+const DEFAULT_MAX_ENTRIES = 20;
 const DEFAULT_MAX_BYTES = 24 * 1024 * 1024;
+const DEFAULT_MAX_DECODED_BYTES = 96 * 1024 * 1024;
+const DECODED_BYTES_PER_PIXEL = 4;
+const UNKNOWN_DIMENSION_DECODED_MULTIPLIER = 8;
 const WEB_IMAGE_PREFIX = "web-image:";
 
 /** Memory budget configuration for the shared browser image URL cache. */
 export interface HistoricalImageCacheOptions {
   readonly maxEntries?: number;
   readonly maxBytes?: number;
+  readonly maxDecodedBytes?: number;
 }
 
 /** Locally uploaded image bytes indexed for immediate post-send transcript reuse. */
@@ -21,11 +25,14 @@ export interface UploadedImageCacheEntry {
   readonly blob: Blob;
   readonly name?: string;
   readonly bytes?: number;
+  readonly width?: number;
+  readonly height?: number;
 }
 
 interface CacheRecord {
   readonly url: string;
   readonly bytes: number;
+  readonly decodedBytes: number;
   readonly keys: Set<string>;
   readonly leafKeys: Set<string>;
   readonly nameBytesKeys: Set<string>;
@@ -40,6 +47,7 @@ interface CacheRecord {
 export class HistoricalImageCache {
   private readonly maxEntries: number;
   private readonly maxBytes: number;
+  private readonly maxDecodedBytes: number;
   private readonly lru = new Set<CacheRecord>();
   private readonly byKey = new Map<string, CacheRecord>();
   private readonly byLeaf = new Map<string, CacheRecord>();
@@ -48,12 +56,13 @@ export class HistoricalImageCache {
   private readonly inflight = new Map<string, Promise<string>>();
   private readonly urls = new Set<string>();
   private totalBytes = 0;
+  private totalDecodedBytes = 0;
   private disposed = false;
 
   /**
    * @param ctx - Owning ui-conversation fiber.
    * @param sessions - Session Controller object layer.
-   * @param options - Optional LRU entry and byte budget overrides.
+   * @param options - Optional LRU entry, compressed byte, and decoded RGBA byte budget overrides.
    */
   constructor(
     ctx: Context,
@@ -62,6 +71,10 @@ export class HistoricalImageCache {
   ) {
     this.maxEntries = Math.max(1, Math.floor(options.maxEntries ?? DEFAULT_MAX_ENTRIES));
     this.maxBytes = Math.max(1, Math.floor(options.maxBytes ?? DEFAULT_MAX_BYTES));
+    this.maxDecodedBytes = Math.max(
+      1,
+      Math.floor(options.maxDecodedBytes ?? DEFAULT_MAX_DECODED_BYTES),
+    );
     ctx.effect(
       () => () => {
         this.dispose();
@@ -105,13 +118,17 @@ export class HistoricalImageCache {
         if (typeof URL.createObjectURL !== "function") {
           url = `data:${result.value.attachment.mediaType};base64,${bytesToBase64(result.value.data)}`;
         } else {
-          const bytes = Uint8Array.from(result.value.data);
           url = URL.createObjectURL(
-            new Blob([bytes.buffer], { type: result.value.attachment.mediaType }),
+            new Blob([toBlobPart(result.value.data)], { type: result.value.attachment.mediaType }),
           );
         }
         const size = normalizeBytes(result.value.data.byteLength);
-        const record = this.insertRecord(key, url, size);
+        const decodedBytes = estimateDecodedBytes(
+          size,
+          result.value.attachment.width ?? attachment.width,
+          result.value.attachment.height ?? attachment.height,
+        );
+        const record = this.insertRecord(key, url, size, decodedBytes);
         return record.url;
       })
       .finally(() => {
@@ -150,7 +167,8 @@ export class HistoricalImageCache {
       return true;
     }
     const url = URL.createObjectURL(uploaded.blob);
-    const record = this.insertRecord(key, url, bytes);
+    const decodedBytes = estimateDecodedBytes(bytes, uploaded.width, uploaded.height);
+    const record = this.insertRecord(key, url, bytes, decodedBytes);
     this.indexUploadedFallbacks(sessionId, uploaded.attachmentId, uploaded.name, bytes, record);
     return true;
   }
@@ -201,7 +219,8 @@ export class HistoricalImageCache {
       return false;
     }
     const size = normalizeBytes(bytes ?? attachment.bytes);
-    this.insertRecord(key, url, size);
+    const decodedBytes = estimateDecodedBytes(size, attachment.width, attachment.height);
+    this.insertRecord(key, url, size, decodedBytes);
     return true;
   }
 
@@ -287,10 +306,11 @@ export class HistoricalImageCache {
     }
   }
 
-  private insertRecord(key: string, url: string, bytes: number): CacheRecord {
+  private insertRecord(key: string, url: string, bytes: number, decodedBytes: number): CacheRecord {
     const record: CacheRecord = {
       url,
       bytes,
+      decodedBytes,
       keys: new Set([key]),
       leafKeys: new Set(),
       nameBytesKeys: new Set(),
@@ -300,6 +320,7 @@ export class HistoricalImageCache {
     this.byKey.set(key, record);
     this.lru.add(record);
     this.totalBytes += bytes;
+    this.totalDecodedBytes += decodedBytes;
     this.enforceBudget(record);
     return record;
   }
@@ -322,7 +343,13 @@ export class HistoricalImageCache {
 
   private enforceBudget(protectedRecord?: CacheRecord): void {
     for (const candidate of this.lru) {
-      if (this.lru.size <= this.maxEntries && this.totalBytes <= this.maxBytes) break;
+      if (
+        this.lru.size <= this.maxEntries &&
+        this.totalBytes <= this.maxBytes &&
+        this.totalDecodedBytes <= this.maxDecodedBytes
+      ) {
+        break;
+      }
       if (candidate === protectedRecord) continue;
       this.deleteRecord(candidate);
     }
@@ -338,6 +365,7 @@ export class HistoricalImageCache {
   private deleteRecord(record: CacheRecord): void {
     if (!this.lru.delete(record)) return;
     this.totalBytes = Math.max(0, this.totalBytes - record.bytes);
+    this.totalDecodedBytes = Math.max(0, this.totalDecodedBytes - record.decodedBytes);
     for (const key of record.keys) {
       if (this.byKey.get(key) === record) this.byKey.delete(key);
     }
@@ -371,6 +399,7 @@ export class HistoricalImageCache {
     this.byNameBytes.clear();
     this.byPendingName.clear();
     this.totalBytes = 0;
+    this.totalDecodedBytes = 0;
   }
 }
 
@@ -392,6 +421,34 @@ function fallbackPendingNameKey(sessionId: SessionId, name: string): string {
 
 function normalizeBytes(value: number | undefined): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+function normalizeDimension(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : undefined;
+}
+
+function estimateDecodedBytes(
+  compressedBytes: number,
+  width: number | undefined,
+  height: number | undefined,
+): number {
+  const w = normalizeDimension(width);
+  const h = normalizeDimension(height);
+  if (w !== undefined && h !== undefined) {
+    return Math.min(Number.MAX_SAFE_INTEGER, w * h * DECODED_BYTES_PER_PIXEL);
+  }
+  return compressedBytes * UNKNOWN_DIMENSION_DECODED_MULTIPLIER;
+}
+
+function toBlobPart(data: Uint8Array): BlobPart {
+  if (data.buffer instanceof ArrayBuffer) {
+    return data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
+      ? data.buffer
+      : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  }
+  return Uint8Array.from(data);
 }
 
 function addIndexedRecord(

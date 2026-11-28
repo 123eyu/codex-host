@@ -33,6 +33,29 @@ import { HistoricalImageCache, type UploadedImageCacheEntry } from "./historical
 import { ConversationViewRegistry } from "./view-registry.ts";
 import { ConversationGroupRegistry } from "./group-registry.ts";
 
+/** Coalescing window for high-frequency live-chunk UI notifications when visible. */
+export const LIVE_STREAM_COALESCE_MS = 40;
+
+const SHELL_WINDOW_HIDDEN_EVENT = "codexhost:window-hidden-change";
+
+function isShellWindowHidden(event?: Event): boolean {
+  const detail = (event as { detail?: { hidden?: unknown } } | undefined)?.detail;
+  if (typeof detail?.hidden === "boolean") return detail.hidden;
+  const winHidden =
+    typeof window !== "undefined"
+      ? (window as { __codexhostWindowHidden?: unknown }).__codexhostWindowHidden
+      : undefined;
+  if (typeof winHidden === "boolean") return winHidden;
+  const globalHidden = (globalThis as { __codexhostWindowHidden?: unknown })
+    .__codexhostWindowHidden;
+  return globalHidden === true;
+}
+
+function isWindowHidden(event?: Event): boolean {
+  const docHidden = typeof document !== "undefined" && document.hidden === true;
+  return docHidden || isShellWindowHidden(event);
+}
+
 /** Observable faces published for one Session's Conversation assembly. */
 export interface ConversationBinding {
   readonly snapshot: ObservableSnapshot<ConversationSnapshot>;
@@ -64,7 +87,11 @@ class BoundConversation implements ConversationBinding {
   private readonly viewStore: ConversationViewSnapshotStore;
   private readonly targetSources = new Map<string, ObservableSnapshot<unknown>>();
   private revision = -1;
+  private timer: ReturnType<typeof setTimeout> | undefined;
   private frame: number | undefined;
+  private deferredWhileHidden = false;
+  private disposed = false;
+  private disposeVisibilityListeners: (() => void) | undefined;
   private disposeFeed: () => void = () => {};
 
   constructor(
@@ -100,7 +127,11 @@ class BoundConversation implements ConversationBinding {
   }
 
   activate(target: string): void {
-    if (this.assembler.activateTarget(target)) this.snapshot.set(this.currentSnapshot());
+    const activated = this.assembler.activateTarget(target);
+    if (activated) {
+      this.cancelScheduledFlush();
+      this.snapshot.set(this.currentSnapshot());
+    }
     this.openTurn.set(this.assembler.openTurn());
   }
 
@@ -109,7 +140,9 @@ class BoundConversation implements ConversationBinding {
   }
 
   dispose(): void {
-    this.cancelFrame();
+    if (this.disposed) return;
+    this.disposed = true;
+    this.cancelScheduledFlush();
     this.disposeFeed();
   }
 
@@ -145,29 +178,101 @@ class BoundConversation implements ConversationBinding {
   }
 
   private publish(publication: ConversationPublication): void {
-    if (publication === "none") return;
-    if (publication === "animation-frame" && typeof requestAnimationFrame === "function") {
-      if (this.frame !== undefined) return;
-      // Cross three paint opportunities before publishing high-frequency stream updates.
-      this.frame = requestAnimationFrame(() => {
-        this.frame = requestAnimationFrame(() => {
-          this.frame = requestAnimationFrame(() => {
-            this.frame = undefined;
-            this.flush();
-          });
-        });
-      });
+    if (this.disposed || publication === "none") return;
+    if (publication === "animation-frame") {
+      if (isWindowHidden()) {
+        this.deferWhileHidden();
+        return;
+      }
+      this.scheduleCoalescedFlush();
       return;
     }
-    this.cancelFrame();
+    this.cancelScheduledFlush();
     this.flush();
   }
 
-  private cancelFrame(): void {
+  private scheduleCoalescedFlush(): void {
+    if (this.disposed || this.timer !== undefined || this.frame !== undefined) return;
+    this.detachVisibilityListeners();
+    this.deferredWhileHidden = false;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      if (this.disposed) return;
+      if (isWindowHidden()) {
+        this.deferWhileHidden();
+        return;
+      }
+      if (typeof requestAnimationFrame === "function") {
+        this.frame = requestAnimationFrame(() => {
+          this.frame = undefined;
+          if (this.disposed) return;
+          if (isWindowHidden()) {
+            this.deferWhileHidden();
+            return;
+          }
+          this.flush();
+        });
+      } else {
+        this.flush();
+      }
+    }, LIVE_STREAM_COALESCE_MS);
+  }
+
+  private deferWhileHidden(): void {
+    if (this.disposed) return;
+    this.clearTimers();
+    this.deferredWhileHidden = true;
+    this.attachVisibilityListeners();
+  }
+
+  private attachVisibilityListeners(): void {
+    if (this.disposed || this.disposeVisibilityListeners !== undefined) return;
+    const onResume = (event?: Event): void => {
+      if (this.disposed || !this.deferredWhileHidden || isWindowHidden(event)) return;
+      this.deferredWhileHidden = false;
+      this.detachVisibilityListeners();
+      this.flush();
+    };
+    const onVisibilityChange = (): void => onResume();
+    const onShellHiddenChange = (event: Event): void => onResume(event);
+    const doc =
+      typeof document !== "undefined" && typeof document.addEventListener === "function"
+        ? document
+        : undefined;
+    const win =
+      typeof window !== "undefined" && typeof window.addEventListener === "function"
+        ? window
+        : undefined;
+    doc?.addEventListener("visibilitychange", onVisibilityChange);
+    win?.addEventListener(SHELL_WINDOW_HIDDEN_EVENT, onShellHiddenChange);
+    this.disposeVisibilityListeners = () => {
+      doc?.removeEventListener("visibilitychange", onVisibilityChange);
+      win?.removeEventListener(SHELL_WINDOW_HIDDEN_EVENT, onShellHiddenChange);
+    };
+  }
+
+  private detachVisibilityListeners(): void {
+    const dispose = this.disposeVisibilityListeners;
+    if (dispose === undefined) return;
+    this.disposeVisibilityListeners = undefined;
+    dispose();
+  }
+
+  private clearTimers(): void {
+    if (this.timer !== undefined) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
     if (this.frame !== undefined && typeof cancelAnimationFrame === "function") {
       cancelAnimationFrame(this.frame);
     }
     this.frame = undefined;
+  }
+
+  private cancelScheduledFlush(): void {
+    this.clearTimers();
+    this.deferredWhileHidden = false;
+    this.detachVisibilityListeners();
   }
 
   private flush(): void {

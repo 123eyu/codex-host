@@ -147,6 +147,11 @@ export class ChSessions {
   private readonly skills: WebSkills;
   private readonly titleRequests = new Set<string>();
   private readonly interactions: ChInteractions | undefined;
+  private readonly interactionReads = new Map<
+    string,
+    { dirty: boolean; cancelled: boolean; promise: Promise<void> }
+  >();
+  private readonly syncedRunningInteractions = new Set<string>();
   private hostOnline = true;
   private hostEpoch: string | undefined;
   constructor(
@@ -205,6 +210,7 @@ export class ChSessions {
     this.realtime = host.realtime
       ? new ChRealtime(host.realtime, {
           thread: (id) => this.view(id),
+          interaction: (id) => this.reconcileBackgroundInteractions(id),
           usage: (id) => {
             const view = this.threads.view(id);
             if (view) this.loadUsage(view, true);
@@ -223,6 +229,7 @@ export class ChSessions {
             this.hostOnline = online;
             if (!online) {
               this.archiveOperations.clear();
+              this.syncedRunningInteractions.clear();
               this.interactions?.clear();
             }
             for (const [, view] of this.threads.views())
@@ -232,8 +239,10 @@ export class ChSessions {
           },
           reset: (epoch, full) => {
             this.archiveOperations.clear();
+            if (full) this.syncedRunningInteractions.clear();
             if (full && this.hostEpoch === epoch) this.threads.forgetKnownTurns();
             if (this.hostEpoch && this.hostEpoch !== epoch) {
+              this.syncedRunningInteractions.clear();
               this.interactions?.clear();
               for (const view of this.threads.newHostGeneration()) view.log.reconnectFollowers();
             }
@@ -582,6 +591,9 @@ export class ChSessions {
     }
     this.threads.replaceHarnesses(ownership);
     this.rows = rows;
+    if (this.host.realtime && this.hostOnline && !this.closed) {
+      this.syncBackgroundRunningInteractions();
+    }
     timing.count("visibleRows", rows.size);
     await this.syncWorkspace(timing, projects);
     if (this.closed) return;
@@ -913,8 +925,10 @@ export class ChSessions {
     } else if (this.handoffs.has(id)) {
       view.log.setProjection(WEB_HANDOFF_PROJECTION, this.handoffs.get(id) ?? null);
     }
-    if (view.ownerSnapshot && this.hostOnline && !this.closed)
+    if (view.ownerSnapshot && this.hostOnline && !this.closed) {
+      this.syncedRunningInteractions.add(id);
       this.interactions?.update(view.ownerSnapshot);
+    }
     if (this.realtime)
       view.log.setProjection("nativeConnection", {
         state: this.hostOnline ? "connected" : "reconnecting",
@@ -1413,11 +1427,90 @@ export class ChSessions {
     this.drafts.delete(id);
   }
 
+  /** Reconcile pending interactions for an unwatched Thread via a bounded snapshot without creating a history view. */
+  private reconcileBackgroundInteractions(threadId: string): Promise<void> {
+    if (this.closed || !this.hostOnline || !this.host.realtime || !this.interactions) {
+      return Promise.resolve();
+    }
+    const active = this.interactionReads.get(threadId);
+    if (active) {
+      active.dirty = true;
+      return active.promise;
+    }
+    const realtime = this.host.realtime;
+    const state = { dirty: true, cancelled: false, promise: Promise.resolve() };
+    this.interactionReads.set(threadId, state);
+    state.promise = (async () => {
+      try {
+        while (state.dirty && !state.cancelled && !this.closed && this.hostOnline) {
+          state.dirty = false;
+          const startEpoch = this.hostEpoch;
+          let snapshot;
+          try {
+            snapshot = await realtime.snapshot(threadId, { truncateToolOutput: true });
+          } catch {
+            return;
+          }
+          if (
+            state.cancelled ||
+            this.closed ||
+            !this.hostOnline ||
+            this.refreshingDeletedIds?.has(threadId)
+          ) {
+            return;
+          }
+          if (
+            (startEpoch !== undefined && snapshot.cursor.epoch !== startEpoch) ||
+            (this.hostEpoch !== undefined && snapshot.cursor.epoch !== this.hostEpoch)
+          ) {
+            continue;
+          }
+          this.interactions?.update(snapshot);
+          if (this.rows.get(threadId)?.status.type === "active") {
+            this.syncedRunningInteractions.add(threadId);
+          }
+        }
+      } finally {
+        if (this.interactionReads.get(threadId) === state) {
+          this.interactionReads.delete(threadId);
+        }
+      }
+    })();
+    return state.promise;
+  }
+
+  private syncBackgroundRunningInteractions(): void {
+    for (const row of this.rows.values()) {
+      if (row.status.type === "active") {
+        if (
+          !this.syncedRunningInteractions.has(row.id) &&
+          !this.interactionReads.has(row.id) &&
+          !this.threads.view(row.id)
+        ) {
+          void this.reconcileBackgroundInteractions(row.id);
+        }
+      } else {
+        this.syncedRunningInteractions.delete(row.id);
+        if (this.interactions?.hasPending(row.id) && !this.threads.view(row.id)) {
+          void this.reconcileBackgroundInteractions(row.id);
+        }
+      }
+    }
+  }
+
   private forgetDeleted(id: string): void {
     this.refreshingDeletedIds?.add(id);
     this.archiveOperations.delete(id);
     this.queueOperations.delete(id);
     this.titleRequests.delete(id);
+    this.syncedRunningInteractions.delete(id);
+    const activeRead = this.interactionReads.get(id);
+    if (activeRead) {
+      activeRead.cancelled = true;
+      activeRead.dirty = false;
+      this.interactionReads.delete(id);
+    }
+    this.interactions?.clearSession(id);
     this.workspacePageRows.delete(id);
     this.rows.delete(id);
     this.handoffs.delete(id);
@@ -2512,6 +2605,8 @@ export class ChSessions {
     this.titleRequests.clear();
     this.pins.close();
     this.realtime?.close();
+    this.syncedRunningInteractions.clear();
+    this.interactionReads.clear();
     this.interactions?.clear();
     clearInterval(this.timer);
     clearInterval(this.idleViewTimer);
