@@ -566,7 +566,10 @@ export class PeerHostManager {
         }
         const input = requestOf(args);
         if (action === "list")
-          return { peers: [...this.clients.values()].map((p) => this.summarize(p)) };
+          return {
+            localPlatform: process.platform,
+            peers: [...this.clients.values()].map((p) => this.summarize(p)),
+          };
         if (action === "syncMesh")
           return this.syncMesh(c.remotePeerSyncMeshParamsSchema.parse(input));
         if (action === "add" || action === "test") {

@@ -107,6 +107,7 @@ export const remotePeerSummarySchema = z.object({
 export type RemotePeerSummary = z.infer<typeof remotePeerSummarySchema>;
 
 export const remotePeerListResultSchema = z.object({
+  localPlatform: z.string().max(64).optional(),
   peers: z.array(remotePeerSummarySchema),
 });
 export type RemotePeerListResult = z.infer<typeof remotePeerListResultSchema>;

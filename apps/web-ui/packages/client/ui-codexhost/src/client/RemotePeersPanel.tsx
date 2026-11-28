@@ -30,7 +30,13 @@ import {
   REMOTE_PEERS_UPDATED_EVENT,
   type RemotePeersUpdatedDetail,
 } from "./remote-peers-events.ts";
-import { BidirectionalIcon, UnlockIcon } from "./RemoteHostIcon.tsx";
+import {
+  BidirectionalIcon,
+  hostPlatformLabel,
+  normalizeHostPlatform,
+  PlatformOsIcon,
+  UnlockIcon,
+} from "./RemoteHostIcon.tsx";
 import {
   AddPeerModal,
   EditPeerModal,
@@ -43,19 +49,24 @@ import { PairingReportBanner, SyncMeshModal } from "./RemotePeerPairing.tsx";
 import { RemotePeersTopology, topologyEdgeKey } from "./RemotePeersTopology.tsx";
 import css from "./RemotePeersPanel.module.css";
 
+interface CachedPeerList {
+  peers: RemotePeerSummary[];
+  localPlatform?: string;
+}
+
 type ListView =
   | { kind: "loading" }
-  | { kind: "ready"; peers: RemotePeerSummary[] }
+  | { kind: "ready"; peers: RemotePeerSummary[]; localPlatform?: string }
   | { kind: "failed"; message: string };
 
 type LoadMode = "initial" | "background" | "silent";
 
 // Distinguish "never fetched" (`undefined`) from "fetched and empty" (`[]`).
-let cachedPeers: RemotePeerSummary[] | undefined;
-let inFlightPeers: Promise<RemotePeerSummary[]> | undefined;
+let cachedList: CachedPeerList | undefined;
+let inFlightPeers: Promise<CachedPeerList> | undefined;
 let cacheGeneration = 0;
 
-function fetchRemotePeers(force = false): Promise<RemotePeerSummary[]> {
+function fetchRemotePeers(force = false): Promise<CachedPeerList> {
   if (!force && inFlightPeers !== undefined) return inFlightPeers;
   if (force) {
     cacheGeneration += 1;
@@ -64,10 +75,14 @@ function fetchRemotePeers(force = false): Promise<RemotePeerSummary[]> {
   const request = remotePeersApi
     .list()
     .then((result) => {
+      const next: CachedPeerList = {
+        peers: result.peers,
+        ...(result.localPlatform ? { localPlatform: result.localPlatform } : {}),
+      };
       if (generation === cacheGeneration) {
-        cachedPeers = result.peers;
+        cachedList = next;
       }
-      return result.peers;
+      return next;
     })
     .finally(() => {
       if (inFlightPeers === request) {
@@ -81,8 +96,8 @@ function fetchRemotePeers(force = false): Promise<RemotePeerSummary[]> {
 function updateCachedPeers(updater: (peers: RemotePeerSummary[]) => RemotePeerSummary[]): void {
   cacheGeneration += 1;
   inFlightPeers = undefined;
-  if (cachedPeers !== undefined) {
-    cachedPeers = updater(cachedPeers);
+  if (cachedList !== undefined) {
+    cachedList = { ...cachedList, peers: updater(cachedList.peers) };
   }
 }
 
@@ -92,7 +107,7 @@ export function prefetchRemotePeers(): void {
 
 export function clearRemotePeersCache(): void {
   cacheGeneration += 1;
-  cachedPeers = undefined;
+  cachedList = undefined;
   inFlightPeers = undefined;
 }
 
@@ -124,7 +139,13 @@ export function RemotePeersPanel({
   onOpenShareTab?: () => void;
 }): ReactNode {
   const [view, setView] = useState<ListView>(() =>
-    cachedPeers !== undefined ? { kind: "ready", peers: cachedPeers } : { kind: "loading" },
+    cachedList !== undefined
+      ? {
+          kind: "ready",
+          peers: cachedList.peers,
+          ...(cachedList.localPlatform ? { localPlatform: cachedList.localPlatform } : {}),
+        }
+      : { kind: "loading" },
   );
   const [refreshing, setRefreshing] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -181,9 +202,13 @@ export function RemotePeersPanel({
       const showSpinner = mode === "background";
       if (showSpinner) setRefreshing(true);
       try {
-        const peers = await fetchRemotePeers(force);
+        const result = await fetchRemotePeers(force);
         if (seq !== loadSeqRef.current) return;
-        setView({ kind: "ready", peers });
+        setView({
+          kind: "ready",
+          peers: result.peers,
+          ...(result.localPlatform ? { localPlatform: result.localPlatform } : {}),
+        });
       } catch (cause) {
         if (seq !== loadSeqRef.current) return;
         if (mode === "initial") {
@@ -197,8 +222,12 @@ export function RemotePeersPanel({
   );
 
   useEffect(() => {
-    if (cachedPeers !== undefined) {
-      setView({ kind: "ready", peers: cachedPeers });
+    if (cachedList !== undefined) {
+      setView({
+        kind: "ready",
+        peers: cachedList.peers,
+        ...(cachedList.localPlatform ? { localPlatform: cachedList.localPlatform } : {}),
+      });
       void loadPeers("silent");
     } else {
       void loadPeers("initial");
@@ -271,9 +300,7 @@ export function RemotePeersPanel({
       peers.map((item) => (item.peerId === peer.peerId ? optimistic : item));
     updateCachedPeers(replaceOptimistic);
     setView((current) =>
-      current.kind === "ready"
-        ? { kind: "ready", peers: replaceOptimistic(current.peers) }
-        : current,
+      current.kind === "ready" ? { ...current, peers: replaceOptimistic(current.peers) } : current,
     );
     try {
       const { peer: updated } = await remotePeersApi.update({
@@ -284,7 +311,7 @@ export function RemotePeersPanel({
         peers.map((item) => (item.peerId === updated.peerId ? updated : item));
       updateCachedPeers(replacePeer);
       setView((current) =>
-        current.kind === "ready" ? { kind: "ready", peers: replacePeer(current.peers) } : current,
+        current.kind === "ready" ? { ...current, peers: replacePeer(current.peers) } : current,
       );
       dispatchRemotePeersUpdated({ source: selfEventSource });
     } catch (cause) {
@@ -292,7 +319,7 @@ export function RemotePeersPanel({
         peers.map((item) => (item.peerId === peer.peerId ? peer : item));
       updateCachedPeers(revertPeer);
       setView((current) =>
-        current.kind === "ready" ? { kind: "ready", peers: revertPeer(current.peers) } : current,
+        current.kind === "ready" ? { ...current, peers: revertPeer(current.peers) } : current,
       );
       setActionError(t("remotePeers.actionFailed", { message: messageOf(cause) }));
     }
@@ -310,7 +337,7 @@ export function RemotePeersPanel({
         peers.map((item) => (item.peerId === updated.peerId ? updated : item));
       updateCachedPeers(replacePeer);
       setView((current) =>
-        current.kind === "ready" ? { kind: "ready", peers: replacePeer(current.peers) } : current,
+        current.kind === "ready" ? { ...current, peers: replacePeer(current.peers) } : current,
       );
       dispatchRemotePeersUpdated({ source: selfEventSource });
     } catch (cause) {
@@ -333,7 +360,7 @@ export function RemotePeersPanel({
         peers.map((item) => (item.peerId === updated.peerId ? updated : item));
       updateCachedPeers(replacePeer);
       setView((current) =>
-        current.kind === "ready" ? { kind: "ready", peers: replacePeer(current.peers) } : current,
+        current.kind === "ready" ? { ...current, peers: replacePeer(current.peers) } : current,
       );
       dispatchRemotePeersUpdated({ source: selfEventSource });
     } catch (cause) {
@@ -384,7 +411,7 @@ export function RemotePeersPanel({
         peers.filter((item) => item.peerId !== removedPeerId);
       updateCachedPeers(filterRemoved);
       setView((current) =>
-        current.kind === "ready" ? { kind: "ready", peers: filterRemoved(current.peers) } : current,
+        current.kind === "ready" ? { ...current, peers: filterRemoved(current.peers) } : current,
       );
       setRemovingPeer(null);
       dispatchRemotePeersUpdated({ source: selfEventSource });
@@ -514,6 +541,8 @@ export function RemotePeersPanel({
               .join(" · ");
 
             const peerColor = resolveRemotePeerColor(peer.hostId, peer.color);
+            const peerOsKind = normalizeHostPlatform(peer.platform);
+            const peerOsLabel = hostPlatformLabel(peer.platform);
             const dotDescription = `${t(PEER_COLOR_LABEL[peerColor])} · ${t(STATE_LABEL[peer.state])}`;
 
             return (
@@ -536,6 +565,20 @@ export function RemotePeersPanel({
                         title={dotDescription}
                       />
                       <span className={css.peerName}>{peer.name}</span>
+                      {peerOsKind !== "unknown" && peerOsLabel !== undefined && (
+                        <span
+                          className={css.peerOsIcon}
+                          data-os={peerOsKind}
+                          role="img"
+                          aria-label={peerOsLabel}
+                          title={peerOsLabel}
+                        >
+                          <PlatformOsIcon
+                            platform={peer.platform}
+                            size={peerOsKind === "win32" ? 11 : 12}
+                          />
+                        </span>
+                      )}
                       <span className={css.transportWord}>
                         {t(TRANSPORT_LABEL[peer.transportKind])}
                       </span>
@@ -715,7 +758,12 @@ export function RemotePeersPanel({
       )}
 
       {view.kind === "ready" && hasEnabledPeers && (
-        <RemotePeersTopology peers={view.peers} recentEdgeKeys={recentEdgeKeys} t={t} />
+        <RemotePeersTopology
+          peers={view.peers}
+          {...(view.localPlatform ? { localPlatform: view.localPlatform } : {})}
+          recentEdgeKeys={recentEdgeKeys}
+          t={t}
+        />
       )}
 
       {addOpen && (
@@ -767,7 +815,7 @@ export function RemotePeersPanel({
             updateCachedPeers(replacePeer);
             setView((current) =>
               current.kind === "ready"
-                ? { kind: "ready", peers: replacePeer(current.peers) }
+                ? { ...current, peers: replacePeer(current.peers) }
                 : current,
             );
             setEditingPeer(null);

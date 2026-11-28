@@ -1,0 +1,20 @@
+.linuxTuxBackdrop {
+  fill: var(--ch-linux-tux-backdrop, none);
+  stroke: var(--ch-linux-tux-stroke, none);
+  stroke-width: var(--ch-linux-tux-stroke-width, 0);
+  stroke-linejoin: round;
+}
+
+.linuxTuxBody {
+  fill: var(--ch-linux-tux-body, currentColor);
+}
+
+:global(body[data-ds-dark-theme]) .linuxTuxBackdrop {
+  fill: var(--ch-linux-tux-backdrop, currentColor);
+  stroke: var(--ch-linux-tux-stroke, color-mix(in srgb, currentColor 65%, transparent));
+  stroke-width: var(--ch-linux-tux-stroke-width, 0.95);
+}
+
+:global(body[data-ds-dark-theme]) .linuxTuxBody {
+  fill: var(--ch-linux-tux-body, #2c2c34);
+}

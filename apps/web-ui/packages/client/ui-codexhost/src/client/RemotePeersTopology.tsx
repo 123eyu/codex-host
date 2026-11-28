@@ -15,6 +15,12 @@ import {
   type RemotePeerColor,
   type RemotePeerSummary,
 } from "@codexhost/shared-contracts";
+import {
+  detectFallbackHostPlatform,
+  hostPlatformLabel,
+  normalizeHostPlatform,
+  PlatformOsIcon,
+} from "./RemoteHostIcon.tsx";
 import type { RemotePeersTranslate as Translate } from "./RemotePeerPairing.tsx";
 import css from "./RemotePeersPanel.module.css";
 
@@ -50,6 +56,7 @@ interface NodeSpec {
   label: string;
   isLocal: boolean;
   color?: RemotePeerColor;
+  platform?: string;
   connected: boolean;
 }
 
@@ -277,31 +284,14 @@ function chevronPath(tipX: number, tipY: number, dirX: number, dirY: number): st
   return `M ${(bx + nx * CHEVRON_SPREAD).toFixed(2)} ${(by + ny * CHEVRON_SPREAD).toFixed(2)} L ${tipX.toFixed(2)} ${tipY.toFixed(2)} L ${(bx - nx * CHEVRON_SPREAD).toFixed(2)} ${(by - ny * CHEVRON_SPREAD).toFixed(2)}`;
 }
 
-function LocalDeviceIcon(): ReactNode {
-  return (
-    <svg
-      width={13}
-      height={13}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.45"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <rect x="2" y="2.5" width="12" height="8" rx="1.6" />
-      <path d="M5.2 13.5h5.6M8 10.5v3" />
-    </svg>
-  );
-}
-
 export function RemotePeersTopology({
   peers,
+  localPlatform,
   recentEdgeKeys,
   t,
 }: {
   peers: readonly RemotePeerSummary[];
+  localPlatform?: string;
   recentEdgeKeys?: ReadonlySet<string>;
   t: Translate;
 }): ReactNode {
@@ -328,12 +318,15 @@ export function RemotePeersTopology({
   const overflowCount = enabledPeers.length - shownPeers.length;
   const localLabel = t("remotePeers.pairing.localHost");
 
+  const resolvedLocalPlatform = localPlatform ?? detectFallbackHostPlatform();
+
   const nodeSpecs = useMemo<NodeSpec[]>(
     () => [
       {
         id: "local",
         label: localLabel,
         isLocal: true,
+        ...(resolvedLocalPlatform ? { platform: resolvedLocalPlatform } : {}),
         connected: true,
       },
       ...shownPeers.map((peer) => ({
@@ -341,10 +334,11 @@ export function RemotePeersTopology({
         label: peer.name,
         isLocal: false,
         color: resolveRemotePeerColor(peer.hostId, peer.color),
+        ...(peer.platform ? { platform: peer.platform } : {}),
         connected: peer.state === "connected",
       })),
     ],
-    [localLabel, shownPeers],
+    [localLabel, resolvedLocalPlatform, shownPeers],
   );
 
   const compact = stageWidth < 430;
@@ -772,6 +766,10 @@ export function RemotePeersTopology({
             const isDragging = draggingId === spec.id;
             const isDimmed = connectedToActive !== null && !connectedToActive.has(spec.id);
 
+            const osKind = normalizeHostPlatform(spec.platform);
+            const osLabel = hostPlatformLabel(spec.platform);
+            const nodeTitle = osLabel ? `${spec.label} · ${osLabel}` : spec.label;
+
             return (
               <div
                 key={spec.id}
@@ -789,9 +787,9 @@ export function RemotePeersTopology({
                 data-dimmed={isDimmed}
                 role="button"
                 tabIndex={0}
-                aria-label={spec.label}
+                aria-label={nodeTitle}
                 aria-pressed={pinnedId === spec.id}
-                title={spec.label}
+                title={nodeTitle}
                 onPointerDown={(event) => handlePointerDown(spec.id, event)}
                 onPointerEnter={() => {
                   if (draggingId === null) setHoveredId(spec.id);
@@ -815,7 +813,7 @@ export function RemotePeersTopology({
               >
                 {spec.isLocal ? (
                   <span className={css.topologyLocalIcon}>
-                    <LocalDeviceIcon />
+                    <PlatformOsIcon platform={spec.platform} size={13} />
                   </span>
                 ) : (
                   <span
@@ -828,6 +826,11 @@ export function RemotePeersTopology({
                   </span>
                 )}
                 <span className={css.topologyPillLabel}>{spec.label}</span>
+                {!spec.isLocal && osKind !== "unknown" && (
+                  <span className={css.topologyOsIcon} data-os={osKind} aria-hidden="true">
+                    <PlatformOsIcon platform={spec.platform} size={osKind === "win32" ? 11 : 12} />
+                  </span>
+                )}
               </div>
             );
           })}
