@@ -81,30 +81,84 @@ export interface FindLeaseWindow {
 
 /**
  * Compute the bounded non-tail index window mounted during an active native-find lease.
- * Returns `null` when the entire transcript fits within `maxMountedRows`.
+ * Returns `null` when the entire transcript fits within `maxMountedRows` (by count, or
+ * by per-entry weights when `entryWeights` is supplied for grouped process rows).
  */
 export function computeFindLeaseWindow(
   entryCount: number,
   centerIndex: number,
   maxMountedRows = FIND_LEASE_MAX_MOUNTED_ROWS,
   pinTail = PIN_TAIL,
+  entryWeights?: readonly number[],
 ): FindLeaseWindow | null {
-  if (entryCount <= maxMountedRows) return null;
+  if (entryWeights === undefined || entryWeights.length !== entryCount) {
+    if (entryCount <= maxMountedRows) return null;
+    const effectiveTail = Math.min(Math.max(0, pinTail), entryCount);
+    const tailStart = entryCount - effectiveTail;
+    const windowBudget = Math.max(0, maxMountedRows - effectiveTail);
+    if (windowBudget === 0 || tailStart <= 0) {
+      return { start: tailStart, end: entryCount - 1 };
+    }
+    const clampedCenter = Math.max(0, Math.min(tailStart - 1, Math.trunc(centerIndex)));
+    const halfBefore = Math.floor(windowBudget / 2);
+    let start = Math.max(0, clampedCenter - halfBefore);
+    let end = start + windowBudget - 1;
+    if (end >= tailStart) {
+      end = tailStart - 1;
+      start = Math.max(0, end - windowBudget + 1);
+    }
+    return { start, end };
+  }
+
+  let totalWeight = 0;
+  for (let i = 0; i < entryCount; i += 1) {
+    totalWeight += Math.max(1, entryWeights[i] ?? 1);
+  }
+  if (totalWeight <= maxMountedRows) return null;
+
   const effectiveTail = Math.min(Math.max(0, pinTail), entryCount);
   const tailStart = entryCount - effectiveTail;
-  const windowBudget = Math.max(0, maxMountedRows - effectiveTail);
-  if (windowBudget === 0 || tailStart <= 0) {
-    return { start: tailStart, end: entryCount - 1 };
+  if (tailStart <= 0) {
+    return { start: 0, end: entryCount - 1 };
   }
+
+  let tailWeight = 0;
+  for (let i = tailStart; i < entryCount; i += 1) {
+    tailWeight += Math.max(1, entryWeights[i] ?? 1);
+  }
+  const windowBudget = Math.max(1, maxMountedRows - tailWeight);
   const clampedCenter = Math.max(0, Math.min(tailStart - 1, Math.trunc(centerIndex)));
-  const halfBefore = Math.floor(windowBudget / 2);
-  let start = Math.max(0, clampedCenter - halfBefore);
-  let end = start + windowBudget - 1;
-  if (end >= tailStart) {
-    end = tailStart - 1;
-    start = Math.max(0, end - windowBudget + 1);
+  let start = clampedCenter;
+  let end = clampedCenter;
+  let usedWeight = Math.max(1, entryWeights[clampedCenter] ?? 1);
+
+  while (start > 0 || end < tailStart - 1) {
+    let expanded = false;
+    if (start > 0) {
+      const nextWeight = Math.max(1, entryWeights[start - 1] ?? 1);
+      if (usedWeight + nextWeight <= windowBudget) {
+        start -= 1;
+        usedWeight += nextWeight;
+        expanded = true;
+      }
+    }
+    if (end < tailStart - 1) {
+      const nextWeight = Math.max(1, entryWeights[end + 1] ?? 1);
+      if (usedWeight + nextWeight <= windowBudget) {
+        end += 1;
+        usedWeight += nextWeight;
+        expanded = true;
+      }
+    }
+    if (!expanded) break;
   }
   return { start, end };
+}
+
+function entryWeightOf(entry: RenderEntry, groupedView?: GroupedChatLookup): number {
+  if (entry.kind !== "group" || groupedView === undefined) return 1;
+  const memberCount = groupedView.groupSource(entry.key).getSnapshot()?.members.length ?? 0;
+  return Math.max(1, memberCount);
 }
 
 /**
@@ -120,12 +174,7 @@ export function shouldActivateVirtualization(
   if (entries.length <= PIN_TAIL || groupedView === undefined) return false;
   let weight = 0;
   for (const entry of entries) {
-    if (entry.kind === "group") {
-      const memberCount = groupedView.groupSource(entry.key).getSnapshot()?.members.length ?? 0;
-      weight += Math.max(1, memberCount);
-    } else {
-      weight += 1;
-    }
+    weight += entryWeightOf(entry, groupedView);
     if (weight > VIRTUALIZE_THRESHOLD) return true;
   }
   return false;
@@ -999,7 +1048,12 @@ export function useTranscriptVirtualization({
   }, [flowKeyToIndex, selectionRange]);
 
   const findWindow = useMemo<FindLeaseWindow | null>(() => {
-    if (!findLeaseActive || entries.length <= findLeaseMaxMountedRows) return null;
+    if (!findLeaseActive) return null;
+    const entryWeights =
+      groupedView !== undefined
+        ? entries.map((entry) => entryWeightOf(entry, groupedView))
+        : undefined;
+    if (entryWeights === undefined && entries.length <= findLeaseMaxMountedRows) return null;
     let centerIndex: number | null = null;
     if (visibleKeys.size > 0) {
       let minVis = Number.POSITIVE_INFINITY;
@@ -1024,13 +1078,20 @@ export function useTranscriptVirtualization({
           ? (flowKeyToIndex.get(fallbackKey) ?? entries.length - 1)
           : entries.length - 1;
     }
-    return computeFindLeaseWindow(entries.length, centerIndex, findLeaseMaxMountedRows, PIN_TAIL);
+    return computeFindLeaseWindow(
+      entries.length,
+      centerIndex,
+      findLeaseMaxMountedRows,
+      PIN_TAIL,
+      entryWeights,
+    );
   }, [
-    entries.length,
+    entries,
     findLeaseActive,
     findLeaseMaxMountedRows,
     flowKeyToIndex,
     focusedFlowKey,
+    groupedView,
     navigationPin?.anchorKey,
     visibleKeys,
   ]);

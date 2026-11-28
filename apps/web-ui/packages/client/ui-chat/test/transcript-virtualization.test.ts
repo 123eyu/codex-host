@@ -2061,8 +2061,8 @@ describe("transcript row-shell content virtualization and find lease", () => {
     const localRoot = createRoot(host);
 
     try {
-      // 34 seats x 2 observed nodes (wrapper + slot) = 68 > SEAT_OBSERVER_COMPACT_MIN_OBSERVED (64).
-      const { entries, nodes } = buildEntries(34);
+      // 66 seats x 2 observed nodes (wrapper + slot) = 132 > SEAT_OBSERVER_COMPACT_MIN_OBSERVED (128).
+      const { entries, nodes } = buildEntries(66);
       const { seatProps } = createFakeSeatEnvironment(nodes);
       const renderRows = (count: number, firstPopulated: boolean) =>
         createElement(
@@ -2084,19 +2084,19 @@ describe("transcript row-shell content virtualization and find lease", () => {
         );
 
       await act(async () => {
-        localRoot.render(renderRows(34, false));
+        localRoot.render(renderRows(66, false));
       });
       const survivingWrapper = host.querySelector<HTMLElement>('[data-chat-flow-key="node-0"]')!;
       expect(survivingWrapper.hasAttribute("data-chat-empty")).toBe(true);
       expect(disconnectCount).toBe(0);
 
-      // In a single commit, unmount 33 seats (triggering synchronous compact() during layout cleanup)
-      // while mutating the surviving seat's slot from empty to populated before microtasks drain.
+      // In a single commit, unmount 65 seats (coalescing compaction to a single microtask)
+      // while mutating the surviving seat's slot from empty to populated.
       await act(async () => {
         localRoot.render(renderRows(1, true));
       });
-      expect(disconnectCount).toBeGreaterThanOrEqual(1);
-      expect(takeRecordsCount).toBeGreaterThanOrEqual(1);
+      expect(disconnectCount).toBe(1);
+      expect(takeRecordsCount).toBe(1);
       expect(survivingWrapper.hasAttribute("data-chat-empty")).toBe(false);
 
       // Subsequent slot mutations on the surviving seat remain observed after compaction.
@@ -2112,5 +2112,21 @@ describe("transcript row-shell content virtualization and find lease", () => {
       host.remove();
       globalThis.MutationObserver = OriginalMO;
     }
+  });
+
+  it("bounds find-lease window by weighted process-group member count when top-level entries are <= 160", () => {
+    // 80 top-level rows, each weighing 4 members (total weight = 320 > 160).
+    const weights = Array.from({ length: 80 }, () => 4);
+    const win = computeFindLeaseWindow(80, 40, 160, 10, weights);
+    expect(win).not.toBeNull();
+    // Tail (10 entries x 4 = 40 weight) leaves 120 weight budget = 30 non-tail entries around center 40.
+    expect(win!.end - win!.start + 1).toBe(30);
+    expect(win!.start).toBeLessThanOrEqual(40);
+    expect(win!.end).toBeGreaterThanOrEqual(40);
+    expect(win!.end).toBeLessThan(70);
+
+    // When total weight fits within maxMountedRows, still returns null (full mount).
+    const lightWeights = Array.from({ length: 80 }, () => 2);
+    expect(computeFindLeaseWindow(80, 40, 160, 10, lightWeights)).toBeNull();
   });
 });

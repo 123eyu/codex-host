@@ -70,7 +70,7 @@ function isIndependentProcessToolNode(node: ChatNode | undefined): boolean {
 
 const CHAT_NODE_SLOT_NAME = "conversation.chat.node";
 const CHAT_EMPTY_ATTRIBUTE = "data-chat-empty";
-const SEAT_OBSERVER_COMPACT_MIN_OBSERVED = 64;
+const SEAT_OBSERVER_COMPACT_MIN_OBSERVED = 128;
 
 function seatSlotOf(wrapper: Element): Element | null {
   for (let child = wrapper.firstElementChild; child !== null; child = child.nextElementSibling) {
@@ -124,6 +124,7 @@ function seatEmptyCoordinatorFor(doc: Document): SeatEmptyCoordinator | null {
   const slotToWrapper = new WeakMap<Element, HTMLElement>();
   let observedNodes = new WeakSet<Node>();
   let observedCount = 0;
+  let compactScheduled = false;
 
   const observeNode = (obs: MutationObserver, node: Node): void => {
     if (observedNodes.has(node)) return;
@@ -171,6 +172,16 @@ function seatEmptyCoordinatorFor(doc: Document): SeatEmptyCoordinator | null {
   observer = new MutationObserver(processRecords);
 
   const compact = (): void => {
+    compactScheduled = false;
+    if (activeSeats.size === 0) {
+      observer.disconnect();
+      observedNodes = new WeakSet<Node>();
+      observedCount = 0;
+      return;
+    }
+    if (observedCount <= Math.max(SEAT_OBSERVER_COMPACT_MIN_OBSERVED, activeSeats.size * 4)) {
+      return;
+    }
     const pending = observer.takeRecords();
     if (pending.length > 0) {
       processRecords(pending);
@@ -191,6 +202,12 @@ function seatEmptyCoordinatorFor(doc: Document): SeatEmptyCoordinator | null {
       }
       syncSeatEmptyAttribute(wrapper, nextSlot);
     }
+  };
+
+  const scheduleCompact = (): void => {
+    if (compactScheduled) return;
+    compactScheduled = true;
+    queueMicrotask(compact);
   };
 
   const coordinator: SeatEmptyCoordinator = {
@@ -216,13 +233,14 @@ function seatEmptyCoordinatorFor(doc: Document): SeatEmptyCoordinator | null {
       }
       activeSeats.delete(wrapper);
       if (activeSeats.size === 0) {
+        compactScheduled = false;
         observer.disconnect();
         observedNodes = new WeakSet<Node>();
         observedCount = 0;
       } else if (
         observedCount > Math.max(SEAT_OBSERVER_COMPACT_MIN_OBSERVED, activeSeats.size * 4)
       ) {
-        compact();
+        scheduleCompact();
       }
     },
   };
