@@ -150,6 +150,20 @@
   backdrop-filter: blur(12px);
 }
 
+/* Rows away from the viewport drop the blur; see near-viewport.ts. */
+:global(
+    body[data-codexhost-wallpaper]
+      [data-chat-flow-key]:not([data-chat-flow-key] *, [data-chat-near-viewport])
+  )
+  .panel,
+:global(
+    body[data-codexhost-wallpaper] [data-chat-near-viewport-gate]:not([data-chat-near-viewport])
+  )
+  .panel {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
 .panelHeader {
   display: flex;
   align-items: center;

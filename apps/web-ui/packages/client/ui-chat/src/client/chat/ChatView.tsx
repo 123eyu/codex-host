@@ -61,6 +61,7 @@ import { SelectionActions } from "./SelectionActions.tsx";
 import { ChatMarkdown } from "./ChatMarkdown.tsx";
 import { HandoffDivider } from "./HandoffDivider.tsx";
 import { HandoffModal } from "./HandoffModal.tsx";
+import { useNearViewport } from "./near-viewport.ts";
 import css from "./ChatView.module.css";
 
 declare module "@deepseek-ai/dsh-session-projection/types" {
@@ -566,6 +567,7 @@ export function ChatView({
     sessionId,
     entries,
     nodeStore,
+    groupedView: groupedChat,
     listRef: scroll.listRef,
     columnRef: scroll.columnRef,
     editingFlowKey,
@@ -576,6 +578,9 @@ export function ChatView({
     onTailScrollClamp: scroll.reconcileTail,
     onScrollCompensated: scroll.adjustBaseline,
   });
+  const handoffGateRef = useRef<HTMLDivElement>(null);
+  const showHandoffDivider = !hasMore && handoffMeta != null;
+  useNearViewport(handoffGateRef, showHandoffDivider);
   const [pendingTurnJump, setPendingTurnJump] = useState<{
     readonly sessionId: string;
     readonly item: TurnRailItem;
@@ -684,13 +689,15 @@ export function ChatView({
                 )}
               </div>
             )}
-            {!hasMore && handoffMeta != null && (
-              <HandoffDivider
-                handoff={handoffMeta}
-                hostId={remoteHostId}
-                onOpenSource={openSession}
-                t={t}
-              />
+            {showHandoffDivider && (
+              <div ref={handoffGateRef} data-chat-near-viewport-gate="">
+                <HandoffDivider
+                  handoff={handoffMeta}
+                  hostId={remoteHostId}
+                  onOpenSource={openSession}
+                  t={t}
+                />
+              </div>
             )}
             <ChatMarkdown
               key={sessionId}

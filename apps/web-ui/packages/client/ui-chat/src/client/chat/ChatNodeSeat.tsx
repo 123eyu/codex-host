@@ -69,6 +69,8 @@ function isIndependentProcessToolNode(node: ChatNode | undefined): boolean {
 }
 
 const CHAT_NODE_SLOT_NAME = "conversation.chat.node";
+const CHAT_EMPTY_ATTRIBUTE = "data-chat-empty";
+const SEAT_OBSERVER_COMPACT_MIN_OBSERVED = 64;
 
 function seatSlotOf(wrapper: Element): Element | null {
   for (let child = wrapper.firstElementChild; child !== null; child = child.nextElementSibling) {
@@ -91,11 +93,142 @@ function isElementEmpty(element: Element): boolean {
 }
 
 function syncSeatEmptyAttribute(wrapper: HTMLElement, slot: Element | null): void {
-  if (slot !== null && isElementEmpty(slot)) {
-    wrapper.setAttribute("data-chat-empty", "");
-  } else {
-    wrapper.removeAttribute("data-chat-empty");
+  const empty = slot !== null && isElementEmpty(slot);
+  if (empty) {
+    if (!wrapper.hasAttribute(CHAT_EMPTY_ATTRIBUTE)) {
+      wrapper.setAttribute(CHAT_EMPTY_ATTRIBUTE, "");
+    }
+  } else if (wrapper.hasAttribute(CHAT_EMPTY_ATTRIBUTE)) {
+    wrapper.removeAttribute(CHAT_EMPTY_ATTRIBUTE);
   }
+}
+
+interface SeatEmptyCoordinator {
+  observe(wrapper: HTMLElement): void;
+  unobserve(wrapper: HTMLElement): void;
+}
+
+const seatEmptyCoordinators = new WeakMap<Document, SeatEmptyCoordinator>();
+
+/**
+ * Share a single direct-child MutationObserver per document across all mounted
+ * `ChatNodeSeat` shells so empty-slot tracking never spawns one observer per row
+ * or runs synchronous DOM checks on unrelated React re-renders.
+ */
+function seatEmptyCoordinatorFor(doc: Document): SeatEmptyCoordinator | null {
+  if (typeof MutationObserver === "undefined") return null;
+  const existing = seatEmptyCoordinators.get(doc);
+  if (existing !== undefined) return existing;
+
+  const activeSeats = new Map<HTMLElement, Element | null>();
+  const slotToWrapper = new WeakMap<Element, HTMLElement>();
+  let observedNodes = new WeakSet<Node>();
+  let observedCount = 0;
+
+  const observeNode = (obs: MutationObserver, node: Node): void => {
+    if (observedNodes.has(node)) return;
+    obs.observe(node, { childList: true });
+    observedNodes.add(node);
+    observedCount += 1;
+  };
+
+  let observer!: MutationObserver;
+
+  const processRecords = (records: readonly MutationRecord[]): void => {
+    const dirtyWrappers = new Set<HTMLElement>();
+    const wrapperChanged = new Set<HTMLElement>();
+    for (const record of records) {
+      const target = record.target;
+      if (activeSeats.has(target as HTMLElement)) {
+        const wrapper = target as HTMLElement;
+        dirtyWrappers.add(wrapper);
+        wrapperChanged.add(wrapper);
+      } else if (target.nodeType === 1) {
+        const wrapper = slotToWrapper.get(target as Element);
+        if (wrapper !== undefined && activeSeats.has(wrapper)) {
+          dirtyWrappers.add(wrapper);
+        }
+      }
+    }
+    for (const wrapper of dirtyWrappers) {
+      let slot = activeSeats.get(wrapper) ?? null;
+      if (wrapperChanged.has(wrapper)) {
+        const nextSlot = seatSlotOf(wrapper);
+        if (nextSlot !== slot) {
+          if (slot !== null) slotToWrapper.delete(slot);
+          activeSeats.set(wrapper, nextSlot);
+          if (nextSlot !== null) {
+            slotToWrapper.set(nextSlot, wrapper);
+            observeNode(observer, nextSlot);
+          }
+          slot = nextSlot;
+        }
+      }
+      syncSeatEmptyAttribute(wrapper, slot);
+    }
+  };
+
+  observer = new MutationObserver(processRecords);
+
+  const compact = (): void => {
+    const pending = observer.takeRecords();
+    if (pending.length > 0) {
+      processRecords(pending);
+    }
+    observer.disconnect();
+    observedNodes = new WeakSet<Node>();
+    observedCount = 0;
+    for (const [wrapper, prevSlot] of activeSeats) {
+      const nextSlot = seatSlotOf(wrapper);
+      if (nextSlot !== prevSlot) {
+        if (prevSlot !== null) slotToWrapper.delete(prevSlot);
+        activeSeats.set(wrapper, nextSlot);
+      }
+      observeNode(observer, wrapper);
+      if (nextSlot !== null) {
+        slotToWrapper.set(nextSlot, wrapper);
+        observeNode(observer, nextSlot);
+      }
+      syncSeatEmptyAttribute(wrapper, nextSlot);
+    }
+  };
+
+  const coordinator: SeatEmptyCoordinator = {
+    observe(wrapper) {
+      const prevSlot = activeSeats.get(wrapper);
+      const slot = seatSlotOf(wrapper);
+      if (prevSlot !== undefined && prevSlot !== null && prevSlot !== slot) {
+        slotToWrapper.delete(prevSlot);
+      }
+      activeSeats.set(wrapper, slot);
+      observeNode(observer, wrapper);
+      if (slot !== null) {
+        slotToWrapper.set(slot, wrapper);
+        observeNode(observer, slot);
+      }
+      syncSeatEmptyAttribute(wrapper, slot);
+    },
+    unobserve(wrapper) {
+      if (!activeSeats.has(wrapper)) return;
+      const prevSlot = activeSeats.get(wrapper);
+      if (prevSlot !== undefined && prevSlot !== null) {
+        slotToWrapper.delete(prevSlot);
+      }
+      activeSeats.delete(wrapper);
+      if (activeSeats.size === 0) {
+        observer.disconnect();
+        observedNodes = new WeakSet<Node>();
+        observedCount = 0;
+      } else if (
+        observedCount > Math.max(SEAT_OBSERVER_COMPACT_MIN_OBSERVED, activeSeats.size * 4)
+      ) {
+        compact();
+      }
+    },
+  };
+
+  seatEmptyCoordinators.set(doc, coordinator);
+  return coordinator;
 }
 
 /**
@@ -216,39 +349,28 @@ export const ChatNodeSeat = memo(function ChatNodeSeat({
         ? routedNode.key
         : JSON.stringify([routedNode.key, groupPart]);
   const hasRow = routedNode !== undefined && flowKey !== undefined;
+  const nodeKind = routedNode?.kind;
   // Reflect an empty direct `conversation.chat.node` slot onto the row shell so CSS
   // can collapse empty seats without `:has()` sibling selectors inside container queries.
   useLayoutEffect(() => {
     const element = wrapperRef.current;
     if (element === null) return;
     if (!mounted || !hasRow) {
-      element.removeAttribute("data-chat-empty");
+      if (element.hasAttribute(CHAT_EMPTY_ATTRIBUTE)) {
+        element.removeAttribute(CHAT_EMPTY_ATTRIBUTE);
+      }
       return;
     }
-    let observedSlot = seatSlotOf(element);
-    syncSeatEmptyAttribute(element, observedSlot);
-    if (typeof MutationObserver === "undefined") return;
-    const observer = new MutationObserver(() => {
-      const nextSlot = seatSlotOf(element);
-      if (nextSlot !== observedSlot) {
-        observer.disconnect();
-        observer.observe(element, { childList: true });
-        if (nextSlot !== null) observer.observe(nextSlot, { childList: true });
-        observedSlot = nextSlot;
-      }
-      syncSeatEmptyAttribute(element, nextSlot);
-    });
-    observer.observe(element, { childList: true });
-    if (observedSlot !== null) observer.observe(observedSlot, { childList: true });
+    const coordinator = seatEmptyCoordinatorFor(element.ownerDocument);
+    if (coordinator === null) {
+      syncSeatEmptyAttribute(element, seatSlotOf(element));
+      return;
+    }
+    coordinator.observe(element);
     return () => {
-      observer.disconnect();
+      coordinator.unobserve(element);
     };
-  }, [mounted, hasRow, wrapperRef]);
-  useLayoutEffect(() => {
-    const element = wrapperRef.current;
-    if (element === null || !mounted || !hasRow) return;
-    syncSeatEmptyAttribute(element, seatSlotOf(element));
-  });
+  }, [mounted, hasRow, flowKey, nodeKind, wrapperRef]);
   useLayoutEffect(() => {
     if (registerRow === undefined || flowKey === undefined) return;
     const element = wrapperRef.current;
