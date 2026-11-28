@@ -175,6 +175,25 @@ function UploadArrowIcon(): ReactNode {
   );
 }
 
+function UpdateArrowIcon(): ReactNode {
+  return (
+    <svg
+      width="11"
+      height="11"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.1"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <polyline points="17 11 12 6 7 11" />
+      <line x1="12" y1="6" x2="12" y2="18" />
+    </svg>
+  );
+}
+
 function MarketSkeleton(): ReactNode {
   return (
     <div className={css.skeletonWrap} aria-hidden="true">
@@ -187,10 +206,12 @@ function MarketSkeleton(): ReactNode {
                 <div className={css.skeletonIcon} />
                 <div className={css.skeletonBtn} />
               </div>
-              <div className={`${css.skeletonBar} ${css.skeletonTitle}`} />
-              <div className={`${css.skeletonBar} ${css.skeletonMeta}`} />
-              <div className={`${css.skeletonBar} ${css.skeletonDesc}`} />
-              <div className={`${css.skeletonBar} ${css.skeletonDescShort}`} />
+              <div className={css.skeletonFeaturedBody}>
+                <div className={`${css.skeletonBar} ${css.skeletonTitle}`} />
+                <div className={`${css.skeletonBar} ${css.skeletonMeta}`} />
+                <div className={`${css.skeletonBar} ${css.skeletonDesc}`} />
+                <div className={`${css.skeletonBar} ${css.skeletonDescShort}`} />
+              </div>
             </div>
           ))}
         </div>
@@ -942,14 +963,16 @@ export function WebExtensionsSection({
         className={css.updateButton}
         disabled={controlsDisabled}
         aria-busy={isUpdating}
+        title={t("extensions.updateToVersion", { version: entry.version.replace(/^v/u, "") })}
         onClick={() => handleUpdate(validInstalled, entry)}
       >
-        {t(isUpdating ? "extensions.updating" : "extensions.update")}
+        {!isUpdating && <UpdateArrowIcon />}
+        <span>{t(isUpdating ? "extensions.updating" : "extensions.update")}</span>
       </button>
     ) : (
       <button
         type="button"
-        className={css.installedButton}
+        className={layout === "featured" ? css.featuredInstalledButton : css.installedButton}
         disabled={isEntryBusy || recovering}
         title={t("extensions.installedBadge")}
         aria-label={t("extensions.installedBadge")}
@@ -959,7 +982,7 @@ export function WebExtensionsSection({
         }}
       >
         <InstalledCheckIcon />
-        <span>{t("extensions.installedBadge")}</span>
+        {layout !== "featured" && <span>{t("extensions.installedBadge")}</span>}
       </button>
     );
 
@@ -974,10 +997,22 @@ export function WebExtensionsSection({
         description={description}
         iconUrl={resolveHostIconUrl(installed, entry)}
         author={entry.author}
-        version={entry.version}
+        version={
+          updateAvailable && validInstalled ? validInstalled.manifest.version : entry.version
+        }
         downloads={entry.downloads}
         trustTier={entry.trustTier}
         categories={entry.categories}
+        update={
+          updateAvailable && validInstalled
+            ? {
+                version: entry.version,
+                label: t("extensions.updateVersionCue", {
+                  version: entry.version.replace(/^v/u, ""),
+                }),
+              }
+            : undefined
+        }
         incompatiblePlatformLabel={
           desktopOnly ? t("extensions.platform.desktopOnlyShort") : undefined
         }
@@ -1059,18 +1094,24 @@ export function WebExtensionsSection({
         update={
           validItem && catalogEntry && hasHostCatalogUpdate(validItem, catalogEntry)
             ? {
+                version: catalogEntry.version,
                 label: t("extensions.updateVersionCue", {
                   version: catalogEntry.version.replace(/^v/u, ""),
                 }),
                 action: (
                   <button
                     type="button"
-                    className={css.updateButton}
+                    className={css.inlineUpdateButton}
+                    data-action="update-extension"
                     disabled={controlsDisabled}
                     aria-busy={isUpdating}
+                    title={t("extensions.updateToVersion", {
+                      version: catalogEntry.version.replace(/^v/u, ""),
+                    })}
                     onClick={() => handleUpdate(validItem, catalogEntry)}
                   >
-                    {t(isUpdating ? "extensions.updating" : "extensions.update")}
+                    {!isUpdating && <UpdateArrowIcon />}
+                    <span>{t(isUpdating ? "extensions.updating" : "extensions.update")}</span>
                   </button>
                 ),
               }

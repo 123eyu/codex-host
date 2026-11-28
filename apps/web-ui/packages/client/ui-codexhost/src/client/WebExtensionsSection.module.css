@@ -583,11 +583,11 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Featured: 3-column velvet low-contrast cards (Kettu-grade restraint in dark & light) */
+/* Featured: lightweight 3-column Kettu-style cards (0.5px hairline shadow ring, no harsh 1px border) */
 .featuredGrid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
+  gap: 12px;
   align-items: stretch;
   min-width: 0;
 }
@@ -597,33 +597,37 @@
   flex-direction: column;
   gap: 12px;
   min-width: 0;
-  min-height: 176px;
-  padding: 18px;
-  border: 1px solid rgba(0, 0, 0, 0.07);
+  min-height: 172px;
+  padding: 16px;
+  border: 0;
   border-radius: 16px;
-  background: color-mix(in srgb, var(--dsw-alias-label-primary) 1.6%, var(--dsw-alias-bg-layer-1));
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow:
+    0 0 0 0.5px rgb(0 0 0 / 6%),
+    0 1px 1px -1px rgb(0 0 0 / 10%),
+    0 1px 2px 0 rgb(0 0 0 / 5%);
   cursor: pointer;
-  transition:
-    border-color 160ms ease,
-    background-color 160ms ease,
-    box-shadow 160ms ease;
+  transition: box-shadow 160ms ease;
 }
 
 .featuredCard:hover {
-  border-color: rgba(0, 0, 0, 0.13);
-  background: var(--dsw-alias-bg-layer-1);
-  box-shadow: 0 2px 10px rgb(0 0 0 / 4%);
+  box-shadow:
+    0 0 0 1px rgb(0 0 0 / 10%),
+    0 1px 1px -1px rgb(0 0 0 / 10%),
+    0 1px 2px 0 rgb(0 0 0 / 5%);
 }
 
 :global(body[data-ds-dark-theme]) .featuredCard {
-  border-color: var(--dsw-alias-border-l2-darkmode-thin);
-  background: color-mix(in srgb, var(--dsw-alias-label-primary) 2.5%, var(--dsw-alias-bg-base));
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 2.8%, var(--dsw-alias-bg-base));
+  box-shadow:
+    0 0 0 0.5px rgb(255 255 255 / 10%),
+    0 1px 2px rgb(0 0 0 / 40%);
 }
 
 :global(body[data-ds-dark-theme]) .featuredCard:hover {
-  border-color: var(--dsw-alias-border-l2);
-  background: color-mix(in srgb, var(--dsw-alias-label-primary) 4.2%, var(--dsw-alias-bg-base));
-  box-shadow: none;
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 14%),
+    0 1px 2px rgb(0 0 0 / 40%);
 }
 
 .featuredCard:focus-visible,
@@ -634,16 +638,25 @@
 
 .featuredTop {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
+  min-width: 0;
 }
 
 .featuredBody {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
+  flex: 1;
   min-width: 0;
+}
+
+.featuredCard .cardTitle {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 19px;
+  letter-spacing: -0.006em;
 }
 
 .featuredDescription {
@@ -653,8 +666,8 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
   color: var(--dsw-alias-label-secondary);
-  font-size: 12.5px;
-  line-height: 1.55;
+  font-size: 13px;
+  line-height: 18px;
 }
 
 /* Community / Search / Installed: 2-column borderless lightweight rows */
@@ -692,11 +705,6 @@
   opacity: 0.7;
 }
 
-.rowCard[data-update-available="true"] {
-  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 26%, transparent);
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 4%, transparent);
-}
-
 .rowIconWrap {
   flex: none;
   padding-top: 2px;
@@ -705,24 +713,17 @@
 .rowMain {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
   flex: 1;
   min-width: 0;
 }
 
 .rowTop {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  min-width: 0;
-}
-
-.rowTextHead {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  flex: 1;
+  gap: 8px;
+  min-height: 26px;
   min-width: 0;
 }
 
@@ -739,9 +740,9 @@
   overflow: hidden;
   color: var(--dsw-alias-label-primary);
   font-size: 14px;
-  font-weight: 600;
-  line-height: 20px;
-  letter-spacing: -0.01em;
+  font-weight: 500;
+  line-height: 19px;
+  letter-spacing: -0.006em;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -818,6 +819,19 @@
   flex: none;
 }
 
+.metaCategory {
+  gap: 4px;
+  flex: none;
+}
+
+.metaCategoryIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  opacity: 0.78;
+}
+
 .metaDownloads {
   display: inline-flex;
   align-items: center;
@@ -825,6 +839,24 @@
   flex: none;
   color: var(--dsw-alias-label-secondary);
   font-weight: 500;
+}
+
+.metaVersionUpgrade {
+  flex: none;
+  gap: 0;
+}
+
+.metaUpdateTarget {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 3px;
+  color: var(--dsw-alias-state-business-primary);
+  font-weight: 500;
+}
+
+.metaUpdateArrow {
+  opacity: 0.72;
 }
 
 .rowDescription {
@@ -851,40 +883,49 @@
   align-items: center;
   justify-content: center;
   height: 28px;
-  padding: 0 12px;
-  border: 1px solid rgba(0, 0, 0, 0.1);
-  border-radius: 8px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
   background: var(--dsw-alias-bg-layer-1);
+  box-shadow:
+    0 0 0 0.5px rgb(0 0 0 / 6%),
+    0 1px 1px -1px rgb(0 0 0 / 10%),
+    0 1px 2px 0 rgb(0 0 0 / 5%);
   color: var(--dsw-alias-label-primary);
   font: inherit;
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 500;
-  line-height: 16px;
+  line-height: 18px;
   white-space: nowrap;
   cursor: pointer;
   transition:
     background-color 140ms ease,
-    border-color 140ms ease,
+    box-shadow 140ms ease,
     color 140ms ease;
 }
 
 .quietInstallButton:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--dsw-alias-label-primary) 4%, var(--dsw-alias-bg-layer-1));
-  border-color: rgba(0, 0, 0, 0.16);
+  box-shadow:
+    0 0 0 0.5px rgb(0 0 0 / 10%),
+    0 1px 1px -1px rgb(0 0 0 / 12%),
+    0 1px 3px 0 rgb(0 0 0 / 7%);
 }
 
 :global(body[data-ds-dark-theme]) .quietInstallButton {
-  border-color: color-mix(in srgb, var(--dsw-alias-label-primary) 9%, transparent);
-  background: color-mix(in srgb, var(--dsw-alias-label-primary) 3.5%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 4.2%, var(--dsw-alias-bg-base));
+  box-shadow:
+    0 0 0 0.5px rgb(255 255 255 / 10%),
+    0 1px 2px 0 rgb(0 0 0 / 40%);
 }
 
 :global(body[data-ds-dark-theme]) .quietInstallButton:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--dsw-alias-label-primary) 16%, transparent);
-  background: color-mix(in srgb, var(--dsw-alias-label-primary) 8%, transparent);
+  box-shadow:
+    0 0 0 0.5px rgb(255 255 255 / 16%),
+    0 1px 2px 0 rgb(0 0 0 / 40%);
 }
 
 .quietInstallButton:disabled {
-  opacity: 0.48;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
@@ -894,10 +935,12 @@
   justify-content: center;
   gap: 4px;
   height: 28px;
-  padding: 0 10px;
-  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-success-primary) 18%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 7%, transparent);
+  padding: 0 9px;
+  border: 0;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 9%, transparent);
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, var(--dsw-alias-state-success-primary) 22%, transparent);
   color: var(--dsw-alias-state-success-primary);
   font: inherit;
   font-size: 12px;
@@ -907,40 +950,122 @@
   cursor: pointer;
   transition:
     background-color 140ms ease,
-    border-color 140ms ease;
+    box-shadow 140ms ease;
 }
 
 .installedButton:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent);
-  border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 30%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 11%, transparent);
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, var(--dsw-alias-state-success-primary) 38%, transparent);
+}
+
+.featuredInstalledButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 9%, transparent);
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, var(--dsw-alias-state-success-primary) 22%, transparent);
+  color: var(--dsw-alias-state-success-primary);
+  cursor: pointer;
+  transition:
+    background-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.featuredInstalledButton:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 11%, transparent);
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, var(--dsw-alias-state-success-primary) 40%, transparent);
+}
+
+.featuredInstalledButton:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
 }
 
 .updateButton {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 4px;
   height: 28px;
-  padding: 0 12px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: var(--dsw-alias-state-business-primary);
-  color: #ffffff;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 9%, transparent);
+  box-shadow: inset 0 0 0 0.5px
+    color-mix(in srgb, var(--dsw-alias-state-business-primary) 24%, transparent);
+  color: var(--dsw-alias-state-business-primary);
   font: inherit;
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 500;
-  line-height: 16px;
+  line-height: 18px;
   white-space: nowrap;
   cursor: pointer;
-  transition: opacity 140ms ease;
+  transition:
+    background-color 140ms ease,
+    box-shadow 140ms ease,
+    opacity 140ms ease;
 }
 
 .updateButton:hover:not(:disabled) {
-  opacity: 0.9;
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 14%, transparent);
+  box-shadow: inset 0 0 0 0.5px
+    color-mix(in srgb, var(--dsw-alias-state-business-primary) 38%, transparent);
 }
 
 .updateButton:disabled {
   opacity: 0.48;
   cursor: not-allowed;
+}
+
+.inlineUpdateButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3.5px;
+  height: 26px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 9%, transparent);
+  box-shadow: inset 0 0 0 0.5px
+    color-mix(in srgb, var(--dsw-alias-state-business-primary) 24%, transparent);
+  color: var(--dsw-alias-state-business-primary);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 16px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 140ms ease,
+    box-shadow 140ms ease,
+    opacity 140ms ease;
+}
+
+.inlineUpdateButton:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 14%, transparent);
+  box-shadow: inset 0 0 0 0.5px
+    color-mix(in srgb, var(--dsw-alias-state-business-primary) 38%, transparent);
+}
+
+.inlineUpdateButton:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.updateButton:focus-visible,
+.inlineUpdateButton:focus-visible,
+.openPageButton:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
 }
 
 .openPageButton {
@@ -1035,43 +1160,6 @@
   border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 26%, transparent);
 }
 
-.cardUpdate {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px 10px;
-  margin-top: 6px;
-  padding: 5px 8px 5px 10px;
-  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-business-primary) 24%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 8%, transparent);
-  color: var(--dsw-alias-state-business-primary);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 18px;
-}
-
-.cardUpdateLabel {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  font-variant-numeric: tabular-nums;
-}
-
-.cardUpdateLabel::before {
-  content: "";
-  flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--dsw-alias-state-business-primary);
-}
-
-.cardUpdateAction {
-  flex: none;
-}
-
 /* Extension Icon: 40x40 card, 48x48 detail, non-blank category fallback + smooth image fade-in */
 .icon {
   position: relative;
@@ -1086,13 +1174,13 @@
 .iconCard {
   width: 40px;
   height: 40px;
-  border-radius: 10px;
+  border-radius: 11px;
 }
 
 .iconDetail {
   width: 48px;
   height: 48px;
-  border-radius: 12px;
+  border-radius: 13px;
 }
 
 .iconSidebar {
@@ -1140,44 +1228,46 @@
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  box-shadow: inset 0 0 0 0.5px var(--dsw-alias-border-l2);
+  box-shadow: inset 0 0 0 0.5px rgb(0 0 0 / 8%);
   pointer-events: none;
 }
 
+:global(body[data-ds-dark-theme]) .icon[data-icon-loaded="true"]::after {
+  box-shadow: inset 0 0 0 0.5px rgb(255 255 255 / 10%);
+}
+
+/* Built-in default category tiles: Kettu-style flat solid tile with 0.5px hairline ring and crisp white glyph */
+.icon[data-icon-kind="fallback"][data-icon-category] {
+  color: #ffffff;
+  box-shadow: inset 0 0 0 0.5px rgb(0 0 0 / 8%);
+}
+
+:global(body[data-ds-dark-theme]) .icon[data-icon-kind="fallback"][data-icon-category] {
+  box-shadow: inset 0 0 0 0.5px rgb(255 255 255 / 10%);
+}
+
 .icon[data-icon-kind="fallback"][data-icon-category="appearance"] {
-  color: #8b5cf6;
-  background: color-mix(in srgb, #8b5cf6 15%, transparent);
-  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, #8b5cf6 24%, transparent);
+  background: #8b5cf6;
 }
 
 .icon[data-icon-kind="fallback"][data-icon-category="interface"] {
-  color: #3b82f6;
-  background: color-mix(in srgb, #3b82f6 15%, transparent);
-  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, #3b82f6 24%, transparent);
+  background: #2b579a;
 }
 
 .icon[data-icon-kind="fallback"][data-icon-category="workflow"] {
-  color: #10b981;
-  background: color-mix(in srgb, #10b981 15%, transparent);
-  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, #10b981 24%, transparent);
+  background: #059669;
 }
 
 .icon[data-icon-kind="fallback"][data-icon-category="analytics"] {
-  color: #f59e0b;
-  background: color-mix(in srgb, #f59e0b 15%, transparent);
-  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, #f59e0b 24%, transparent);
+  background: #f59e0b;
 }
 
 .icon[data-icon-kind="fallback"][data-icon-category="integrations"] {
-  color: #6366f1;
-  background: color-mix(in srgb, #6366f1 15%, transparent);
-  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, #6366f1 24%, transparent);
+  background: #ec4899;
 }
 
 .icon[data-icon-kind="fallback"][data-icon-category="tools"] {
-  color: var(--dsw-alias-label-secondary);
-  background: var(--dsw-alias-interactive-bg-hover);
-  box-shadow: inset 0 0 0 0.5px var(--dsw-alias-border-l2);
+  background: #64748b;
 }
 
 /* Skeleton loading states */
@@ -1213,12 +1303,29 @@
 .skeletonFeaturedCard {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   min-height: 172px;
   padding: 16px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 14px;
-  background: var(--dsw-alias-bg-layer-2);
+  border: 0;
+  border-radius: 16px;
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow:
+    0 0 0 0.5px rgb(0 0 0 / 6%),
+    0 1px 1px -1px rgb(0 0 0 / 10%),
+    0 1px 2px 0 rgb(0 0 0 / 5%);
+}
+
+:global(body[data-ds-dark-theme]) .skeletonFeaturedCard {
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 2.8%, var(--dsw-alias-bg-base));
+  box-shadow:
+    0 0 0 0.5px rgb(255 255 255 / 10%),
+    0 1px 2px rgb(0 0 0 / 40%);
+}
+
+.skeletonFeaturedBody {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
 }
 
 .skeletonRow {
@@ -1351,7 +1458,7 @@
 }
 
 /* Responsive container queries */
-@container (max-width: 860px) {
+@container (max-width: 900px) {
   .featuredGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1381,6 +1488,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .featuredCard {
+    transition: none;
+  }
+
   .skeletonBar,
   .skeletonIcon,
   .skeletonBtn {
