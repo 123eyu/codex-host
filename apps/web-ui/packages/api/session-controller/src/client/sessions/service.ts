@@ -805,8 +805,11 @@ export class ClientSessions implements ISessions {
         if (byId[sessionId] === undefined) this.projectedItemCache.delete(sessionId);
       }
     }
-    for (const [parentId, projection] of Object.entries(projectionsBySession)) {
-      for (const child of projection.values.subagentCatalog ?? []) {
+    for (const parentId in projectionsBySession) {
+      const projection = projectionsBySession[parentId as SessionId];
+      const subagentCatalog = projection?.values.subagentCatalog;
+      if (subagentCatalog === undefined || subagentCatalog.length === 0) continue;
+      for (const child of subagentCatalog) {
         const childId = child.id;
         const summary = byId[childId];
         const projectionValues =

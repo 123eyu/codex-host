@@ -111,6 +111,8 @@ describe("native shell notification driver", () => {
   it("enables, disables, and sends test notifications via shell bridge without touching Web Push", async () => {
     const { bridge, setState } = fakeShellBridge({ enabled: false, permission: "prompt" });
     const register = vi.fn();
+    const unregister = vi.fn(async () => true);
+    const getRegistrations = vi.fn(async () => [{ unregister }]);
     const getRegistration = vi.fn();
     const win = fakeBrowserWindow({
       __codexhostNotifications: bridge,
@@ -119,13 +121,16 @@ describe("native shell notification driver", () => {
       navigator: {
         userAgent: "Mozilla/5.0",
         maxTouchPoints: 0,
-        serviceWorker: { register, getRegistration },
+        serviceWorker: { register, getRegistration, getRegistrations },
       },
     });
 
     ensureServiceWorker(win);
     resubmitNotifications(win);
+    await Promise.resolve();
     expect(register).not.toHaveBeenCalled();
+    expect(getRegistrations).toHaveBeenCalledTimes(1);
+    expect(unregister).toHaveBeenCalledTimes(1);
     expect(getRegistration).not.toHaveBeenCalled();
 
     (bridge.requestPermission as ReturnType<typeof vi.fn>).mockResolvedValueOnce("denied");

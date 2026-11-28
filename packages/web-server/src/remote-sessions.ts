@@ -42,7 +42,7 @@ import { RemotePeerAttachments, type PeerAttachmentEndpoint } from "./remote-pee
 import type { WebFileRef } from "./web-files.ts";
 import { WEB_IMAGE_LIMITS } from "./web-images.ts";
 import { IDLE_VIEW_MS } from "./web-thread-state.ts";
-import { defaultProjections, type WireEvent } from "./session-log.ts";
+import type { WireEvent } from "./session-log.ts";
 import {
   applyRemoteControls,
   executeRemoteCommand,
@@ -86,6 +86,15 @@ import {
   remoteHostDisplayName,
   type RemoteWorkspaceHost,
 } from "./remote-workspaces.ts";
+import {
+  REMOTE_LIST_PAGE_SIZE,
+  REMOTE_WORKSPACE_PAGE_SIZE,
+  encodeRemoteGlobalCursor,
+  encodeRemoteWorkspaceCursor,
+  parseRemoteListCursor,
+  selectRemoteHeadPage,
+  selectRemoteSlicePage,
+} from "./remote-session-list.ts";
 
 const PREFIX = "web-remote:";
 const PEER_CATALOG_REFRESH_MIN_INTERVAL_MS = 600;
@@ -228,6 +237,7 @@ interface Entry {
 export class RemoteSessions {
   private drafts = new Map<string, RemoteProjectDraft>();
   private pendingFirstTurns = new Map<string, RemoteProjectDraft>();
+  private remoteWorkspaceBySession = new Map<string, string>();
   private readonly titleRequests = new Set<string>();
   private entries = new Map<string, Entry>();
   private hosts = new Map<string, RemoteWorkspaceHost>();
@@ -1811,26 +1821,338 @@ export class RemoteSessions {
     };
     return draft.submission.result;
   }
-  private syncGroups(): void {
-    this.workspaces?.setRemoteGroups(
-      remoteWorkspaceGroups(this.hosts.values(), [
-        ...[...this.entries].map(([sessionId, entry]) => ({
-          sessionId,
-          ...entry.identity,
-          cwd: entry.row.cwd,
-          projectId: this.workspaces?.remoteProjectId(sessionId),
+  private remoteGroupsSnapshot() {
+    return remoteWorkspaceGroups(this.hosts.values(), [
+      ...[...this.entries].map(([sessionId, entry]) => ({
+        sessionId,
+        ...entry.identity,
+        cwd: entry.row.cwd,
+        projectId: this.workspaces?.remoteProjectId(sessionId),
+      })),
+      ...[...this.drafts.values()]
+        .filter((d) => !d.canonicalId)
+        .map((d) => ({
+          sessionId: d.id,
+          hostId: d.target.hostId,
+          threadId: d.id,
+          cwd: d.target.cwd,
+          projectId: d.projectId,
         })),
-        ...[...this.drafts.values()]
-          .filter((d) => !d.canonicalId)
-          .map((d) => ({
-            sessionId: d.id,
-            hostId: d.target.hostId,
-            threadId: d.id,
-            cwd: d.target.cwd,
-            projectId: d.projectId,
-          })),
-      ]),
-    );
+    ]);
+  }
+  private syncGroups(): void {
+    const groups = this.remoteGroupsSnapshot();
+    const bySession = new Map<string, string>();
+    for (const group of groups) {
+      for (const sessionId of group.sessionIds) {
+        bySession.set(sessionId, group.workspaceId);
+      }
+    }
+    this.remoteWorkspaceBySession = bySession;
+    this.workspaces?.setRemoteGroups(groups);
+  }
+  private workspaceMapForListing(): Map<string, string> {
+    if (this.remoteWorkspaceBySession.size > 0 || this.entries.size === 0) {
+      return this.remoteWorkspaceBySession;
+    }
+    const groups = this.remoteGroupsSnapshot();
+    const bySession = new Map<string, string>();
+    for (const group of groups) {
+      for (const sessionId of group.sessionIds) {
+        bySession.set(sessionId, group.workspaceId);
+      }
+    }
+    this.remoteWorkspaceBySession = bySession;
+    return bySession;
+  }
+  private remoteAncestors(id: string): string[] {
+    const ancestors: string[] = [];
+    const seen = new Set<string>([id]);
+    let current = this.entries.get(id);
+    while (current) {
+      const parentId =
+        current.peerTreeParent ??
+        (current.row.parentThreadId
+          ? remoteSessionId(current.identity.hostId, current.row.parentThreadId)
+          : undefined);
+      if (!parentId || seen.has(parentId)) break;
+      const parentEntry = this.entries.get(parentId);
+      if (!parentEntry) break;
+      seen.add(parentId);
+      ancestors.push(parentId);
+      current = parentEntry;
+    }
+    return ancestors;
+  }
+  private orderedRemoteIds(
+    includeArchived: boolean,
+    workspaceFilter?: {
+      readonly workspaceId: string;
+      readonly bySession: ReadonlyMap<string, string>;
+    },
+  ): string[] {
+    const eligible: Array<{ readonly id: string; readonly updatedAt: number }> = [];
+    for (const [id, entry] of this.entries) {
+      if (!includeArchived && entry.archived) continue;
+      if (workspaceFilter && workspaceFilter.bySession.get(id) !== workspaceFilter.workspaceId) {
+        continue;
+      }
+      eligible.push({ id, updatedAt: threadRecencyMs(entry.row) });
+    }
+    eligible.sort((left, right) => right.updatedAt - left.updatedAt);
+    return eligible.map((item) => item.id);
+  }
+  private remotePriorityIds(includeArchived: boolean): Set<string> {
+    const priority = new Set<string>();
+    const pinnedIds = this.workspaces?.pinnedSessionIds() ?? this.syncPins();
+    for (const pinnedId of pinnedIds) {
+      const entry = this.entries.get(pinnedId);
+      if (entry && (includeArchived || !entry.archived)) priority.add(pinnedId);
+    }
+    for (const item of this.pending.values()) {
+      const entry = this.entries.get(item.sessionId);
+      if (entry && (includeArchived || !entry.archived)) priority.add(item.sessionId);
+    }
+    for (const [id, entry] of this.entries) {
+      if (!includeArchived && entry.archived) continue;
+      if ((entry.online && entry.row.status.type === "active") || entry.view !== undefined) {
+        priority.add(id);
+      }
+    }
+    return priority;
+  }
+  private async listRemoteSessions(
+    args: Record<string, unknown>,
+    next: () => Promise<unknown>,
+  ): Promise<unknown> {
+    const request = requestOf<{
+      sessionId?: unknown;
+      cursor?: unknown;
+      workspaceId?: unknown;
+      includeArchived?: unknown;
+    }>(args);
+    if (request.sessionId !== undefined) {
+      const id = request.sessionId;
+      if (typeof id !== "string" || !id.startsWith(PREFIX)) return next();
+      if (request.cursor !== undefined)
+        throw new RpcError("session/list-invalid", "Invalid direct-link identity.");
+      const draft = this.drafts.get(id);
+      if (draft && !draft.canonicalId)
+        return { items: [this.draftSummary(draft)], archivedSessionIds: this.syncArchives() };
+      const canonicalId = draft?.canonicalId ?? id;
+      if (canonicalId.startsWith(`${PREFIX}draft-`))
+        throw new RpcError("session/not-found", "Remote draft Session is no longer available.");
+      const identity = remoteSessionIdentity(canonicalId);
+      let entry: Entry | undefined;
+      if (identity?.hostId.startsWith(REMOTE_PEER_HOST_ID_PREFIX)) {
+        entry = await this.lookupPeerSummary(canonicalId, identity.hostId);
+      } else {
+        if (!this.entries.has(canonicalId)) await this.refresh();
+        entry = this.entries.get(canonicalId);
+      }
+      if (!entry) throw new RpcError("remote/not-found", "Remote Thread not found");
+      return {
+        items: [this.summary(canonicalId, entry)],
+        archivedSessionIds: this.syncArchives(),
+      };
+    }
+
+    const includeArchived = request.includeArchived === true;
+    const rawCursor = typeof request.cursor === "string" ? request.cursor : undefined;
+    const parsedCursor = rawCursor === undefined ? undefined : parseRemoteListCursor(rawCursor);
+    const workspaceId = typeof request.workspaceId === "string" ? request.workspaceId : undefined;
+
+    // 1. Remote workspace pagination (`workspaceId` starts with `remote-workspace:`).
+    if (workspaceId !== undefined && workspaceId.startsWith("remote-workspace:")) {
+      if (request.cursor === undefined || typeof request.cursor !== "string") {
+        throw new RpcError("session/list-invalid", "workspaceId only continues a cursor page.");
+      }
+      if (request.includeArchived !== undefined && typeof request.includeArchived !== "boolean") {
+        throw new RpcError("session/list-invalid", "includeArchived must be a boolean.");
+      }
+      let offset = 0;
+      if (parsedCursor?.kind === "workspace") {
+        if (
+          parsedCursor.workspaceId !== workspaceId ||
+          parsedCursor.includeArchived !== includeArchived
+        ) {
+          throw new RpcError(
+            "session/list-invalid",
+            "Invalid session list cursor or archive scope.",
+          );
+        }
+        offset = parsedCursor.offset;
+      } else if (
+        parsedCursor?.kind === "global" &&
+        parsedCursor.includeArchived !== includeArchived
+      ) {
+        throw new RpcError("session/list-invalid", "Invalid session list cursor or archive scope.");
+      }
+      const bySession = this.workspaceMapForListing();
+      const orderedIds = this.orderedRemoteIds(includeArchived, { workspaceId, bySession });
+      const page = selectRemoteSlicePage({
+        orderedIds,
+        offset,
+        pageSize: REMOTE_WORKSPACE_PAGE_SIZE,
+        ancestorsOf: (id) => this.remoteAncestors(id),
+      });
+      const draftItems =
+        offset === 0
+          ? [...this.drafts.values()]
+              .filter((d) => !d.canonicalId && bySession.get(d.id) === workspaceId)
+              .map((d) => this.draftSummary(d))
+          : [];
+      const items = [
+        ...draftItems,
+        ...page.ids
+          .map((id) => {
+            const entry = this.entries.get(id);
+            return entry ? this.summary(id, entry) : undefined;
+          })
+          .filter((item): item is ReturnType<RemoteSessions["summary"]> => item !== undefined),
+      ];
+      return {
+        items,
+        archivedSessionIds: this.syncArchives(),
+        nextCursor: page.hasMore
+          ? encodeRemoteWorkspaceCursor({
+              workspaceId,
+              includeArchived,
+              offset: page.nextOffset,
+            })
+          : null,
+      };
+    }
+
+    // Helper to invoke the local session/list handler with an unwrapped local cursor.
+    const callLocalWithCursor = async (localCursor: string | null) => {
+      if (localCursor === null) {
+        return {
+          items: [] as unknown[],
+          archivedSessionIds: this.syncArchives(),
+          nextCursor: null as string | null,
+        };
+      }
+      const target = (
+        typeof args.request === "object" && args.request !== null && !Array.isArray(args.request)
+          ? args.request
+          : args
+      ) as Record<string, unknown>;
+      const hadCursor = Object.hasOwn(target, "cursor");
+      const previousCursor = target.cursor;
+      target.cursor = localCursor;
+      try {
+        return (await next()) as {
+          items: unknown[];
+          archivedSessionIds?: string[];
+          nextCursor?: string | null;
+        };
+      } finally {
+        if (hadCursor) target.cursor = previousCursor;
+        else delete target.cursor;
+      }
+    };
+
+    // 2. Local workspace pagination: unwrap any composite cursor and never append remote items.
+    if (workspaceId !== undefined) {
+      if (parsedCursor?.kind === "workspace") {
+        throw new RpcError("session/list-invalid", "Invalid session list cursor or archive scope.");
+      }
+      if (parsedCursor?.kind === "global") {
+        if (parsedCursor.includeArchived !== includeArchived) {
+          throw new RpcError(
+            "session/list-invalid",
+            "Invalid session list cursor or archive scope.",
+          );
+        }
+        return callLocalWithCursor(parsedCursor.localCursor);
+      }
+      return next();
+    }
+
+    // 3. Global continuation (`cursor` present, no `workspaceId`).
+    if (request.cursor !== undefined) {
+      if (parsedCursor?.kind === "workspace") {
+        throw new RpcError("session/list-invalid", "Invalid session list cursor or archive scope.");
+      }
+      if (parsedCursor?.kind === "global") {
+        if (parsedCursor.includeArchived !== includeArchived) {
+          throw new RpcError(
+            "session/list-invalid",
+            "Invalid session list cursor or archive scope.",
+          );
+        }
+        const local = await callLocalWithCursor(parsedCursor.localCursor);
+        const orderedIds = this.orderedRemoteIds(includeArchived);
+        const page = selectRemoteSlicePage({
+          orderedIds,
+          offset: parsedCursor.remoteOffset,
+          pageSize: REMOTE_LIST_PAGE_SIZE,
+          ancestorsOf: (id) => this.remoteAncestors(id),
+        });
+        const remoteItems = page.ids
+          .map((id) => {
+            const entry = this.entries.get(id);
+            return entry ? this.summary(id, entry) : undefined;
+          })
+          .filter((item): item is ReturnType<RemoteSessions["summary"]> => item !== undefined);
+        const localNextCursor = local.nextCursor ?? null;
+        const nextCursor = page.hasMore
+          ? encodeRemoteGlobalCursor({
+              includeArchived,
+              localCursor: localNextCursor,
+              remoteOffset: page.nextOffset,
+            })
+          : localNextCursor;
+        return {
+          ...local,
+          items: [...local.items, ...remoteItems],
+          nextCursor,
+        };
+      }
+      // Plain local cursor: remote history was already completely delivered on head; do not resend it.
+      return next();
+    }
+
+    // 4. Head page (`cursor === undefined`, `workspaceId === undefined`).
+    void this.refreshBackground().catch(() => undefined);
+    const local = (await next()) as {
+      items: unknown[];
+      archivedSessionIds?: string[];
+      nextCursor?: string | null;
+    };
+    const draftItems = [...this.drafts.values()]
+      .filter((d) => !d.canonicalId)
+      .map((d) => this.draftSummary(d));
+    const bySession = this.workspaceMapForListing();
+    const orderedIds = this.orderedRemoteIds(includeArchived);
+    const head = selectRemoteHeadPage({
+      orderedIds,
+      priorityIds: this.remotePriorityIds(includeArchived),
+      workspaceIdOf: (id) => bySession.get(id),
+      ancestorsOf: (id) => this.remoteAncestors(id),
+    });
+    const remoteItems = head.ids
+      .map((id) => {
+        const entry = this.entries.get(id);
+        return entry ? this.summary(id, entry) : undefined;
+      })
+      .filter((item): item is ReturnType<RemoteSessions["summary"]> => item !== undefined);
+    if (!head.hasMore) {
+      return {
+        ...local,
+        items: [...local.items, ...draftItems, ...remoteItems],
+      };
+    }
+    return {
+      ...local,
+      items: [...local.items, ...draftItems, ...remoteItems],
+      nextCursor: encodeRemoteGlobalCursor({
+        includeArchived,
+        localCursor: local.nextCursor ?? null,
+        remoteOffset: head.nextRemoteOffset,
+      }),
+    };
   }
   private reference(entry: Entry) {
     return { ...entry.identity };
@@ -1932,7 +2254,6 @@ export class RemoteSessions {
         kind: "cached",
         asOfSeq: 0,
         values: {
-          ...defaultProjections(),
           title: threadListTitle({ ...entry.row, id: entry.identity.threadId }),
           remoteHost: {
             ...entry.identity,
@@ -2844,44 +3165,7 @@ export class RemoteSessions {
         }
       }
       if (method === "session/list") {
-        const request = requestOf<{ sessionId?: unknown; cursor?: unknown }>(args);
-        if (request.sessionId !== undefined) {
-          const id = request.sessionId;
-          if (typeof id !== "string" || !id.startsWith(PREFIX)) return next();
-          if (request.cursor !== undefined)
-            throw new RpcError("session/list-invalid", "Invalid direct-link identity.");
-          const draft = this.drafts.get(id);
-          if (draft && !draft.canonicalId)
-            return { items: [this.draftSummary(draft)], archivedSessionIds: this.syncArchives() };
-          const canonicalId = draft?.canonicalId ?? id;
-          if (canonicalId.startsWith(`${PREFIX}draft-`))
-            throw new RpcError("session/not-found", "Remote draft Session is no longer available.");
-          const identity = remoteSessionIdentity(canonicalId);
-          let entry: Entry | undefined;
-          if (identity?.hostId.startsWith(REMOTE_PEER_HOST_ID_PREFIX)) {
-            entry = await this.lookupPeerSummary(canonicalId, identity.hostId);
-          } else {
-            if (!this.entries.has(canonicalId)) await this.refresh();
-            entry = this.entries.get(canonicalId);
-          }
-          if (!entry) throw new RpcError("remote/not-found", "Remote Thread not found");
-          return {
-            items: [this.summary(canonicalId, entry)],
-            archivedSessionIds: this.syncArchives(),
-          };
-        }
-        void this.refreshBackground().catch(() => undefined);
-        const local = await next();
-        return {
-          ...(local as object),
-          items: [
-            ...(local as { items: unknown[] }).items,
-            ...[...this.drafts.values()]
-              .filter((d) => !d.canonicalId)
-              .map((d) => this.draftSummary(d)),
-            ...[...this.entries].map(([id, entry]) => this.summary(id, entry)),
-          ],
-        };
+        return this.listRemoteSessions(args, next);
       }
       if (method === "session/search") {
         return this.search(args, next);

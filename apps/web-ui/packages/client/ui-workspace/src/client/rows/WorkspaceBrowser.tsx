@@ -792,6 +792,14 @@ function SessionTree({
     setGroupExpanded(group.key, !group.expanded);
   };
 
+  const archivedSessionSet = useMemo(
+    () => new Set(rowState.archivedSessionIds),
+    [rowState.archivedSessionIds],
+  );
+  const workspaceById = useMemo(
+    () => new Map(allWorkspaces.map((item) => [item.workspaceId, item])),
+    [allWorkspaces],
+  );
   const pinnedRows = useMemo(
     () =>
       deriveFlat(list, rowState.pinnedSessionIds, rowState, statuses, forestRoots).filter(
@@ -850,7 +858,15 @@ function SessionTree({
           ? `linked:${group.key}:${id}`
           : `session:${id}`;
     for (const node of sessions) rowKeys.push(rowKeyOf(node.id));
-    const history = localWorkspace
+    const remoteWorkspaceHasUnloaded =
+      group.remote &&
+      workspaceId !== undefined &&
+      (workspaceById
+        .get(workspaceId)
+        ?.sessionIds.some((id) => list.byId[id] === undefined && !archivedSessionSet.has(id)) ??
+        false);
+    const pagedWorkspace = localWorkspace || remoteWorkspaceHasUnloaded;
+    const history = pagedWorkspace
       ? (list.workspaceHistory?.[workspaceId] ??
         (list.canSearchWorkspaceHistory ? "search" : "done"))
       : undefined;
@@ -1099,7 +1115,7 @@ function SessionTree({
                   history === undefined ? !group.remote && list.loading : history === "loading"
                 }
                 workspaceHistory={history}
-                workspaceId={localWorkspace ? workspaceId : undefined}
+                workspaceId={pagedWorkspace ? workspaceId : undefined}
                 fillWorkspace={
                   localWorkspace &&
                   workspaceReady &&
@@ -1423,6 +1439,14 @@ function FlatList({
         (node) => !node.pinned && !rowState.sectionedSessionIds?.has(node.id),
       ),
     [list, sessionIds, rowState, statuses, forestRoots],
+  );
+  const archivedSessionSet = useMemo(
+    () => new Set(rowState.archivedSessionIds),
+    [rowState.archivedSessionIds],
+  );
+  const workspaceById = useMemo(
+    () => new Map(allWorkspaces.map((item) => [item.workspaceId, item])),
+    [allWorkspaces],
   );
   const pinnedRows = useMemo(
     () =>

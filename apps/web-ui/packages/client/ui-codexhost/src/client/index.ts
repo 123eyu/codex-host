@@ -757,7 +757,7 @@ export function apply(ctx: ClientContext): void {
     if (data?.type === "codexhost/open-session" && typeof data.sessionId === "string")
       face.openSession(data.sessionId);
   };
-  if ("serviceWorker" in navigator) {
+  if (getShellNotificationBridge() === undefined && "serviceWorker" in navigator) {
     navigator.serviceWorker.addEventListener("message", onMessage);
     ctx.effect(
       () => () => {
