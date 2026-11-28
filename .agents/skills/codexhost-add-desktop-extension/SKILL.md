@@ -108,7 +108,7 @@ export async function mount(root, api) {
 
 ### 2.4 Web 宿主注入（`web`）
 
-ESM 模块（`.mjs`），导出 `activate(api)` 并可返回清理函数（也可只声明 `web.style` 纯 CSS 扩展）。通过 `api.dom.mount(regionOrEl)`（内置区域 `app`、`topbar`、`sidebar`、`conversation`、`composer-dock`）、`api.dom.mark`、`api.session.getActive()` / `api.session.onChange(cb)`（只读主会话上下文：`id`、`title`、`cwd`、`workspaceId`、`isBlank`、`isRemote`、`running`）、`api.assets.url`、`api.storage`、`api.backend.invoke`、`api.settings.registerPage`、`api.panels.register` 与 `api.signal` / `api.track` 集成，停用时自动回收全部节点、标记与订阅。
+ESM 模块（`.mjs`），导出 `activate(api)` 并可返回清理函数（也可只声明 `web.style` 纯 CSS 扩展）。通过 `api.dom.mount(regionOrEl)`（内置区域 `app`、`topbar`、`sidebar`、`conversation`、`composer-dock`）、`api.dom.mark`、`api.session.getActive()` / `api.session.onChange(cb)`（只读主会话上下文：`id`、`title`、`cwd`、`workspaceId`、`isBlank`、`isRemote`、`running`）、`api.threads?.watchTree(cb)`、`api.navigate?.openThread(threadId)`、`api.harnesses?.describe(id)`、`api.tabIcon?.set(pngDataUrl | null)`、`api.assets.url`、`api.storage`、`api.backend.invoke`、`api.settings.registerPage`、`api.panels.register` 与 `api.signal` / `api.track` 集成，停用时自动回收全部节点、标记与订阅。
 
 ### 2.5 单实例 Node 后端（`backend`）
 
@@ -146,7 +146,7 @@ export async function activate(ctx) {
    node tools/build-desktop-extension.mjs "$EXTENSION_SOURCE_DIR" "<输出目录>"
    ```
 2. 使用 [隔离实测 Skill](../codexhost-isolated-testing/SKILL.md) 以独立数据目录与空闲端口启动测试 Web / Desktop（不碰 `~/.codexhost` 与用户正在运行的端口）。
-3. 从 Desktop「设置 → 插件」或 Web 一级目录「插件 → 插件中心」导入 `.zip`（或开发期填入本机目录 `localDir`）并启用：
+3. 从 Desktop「设置 → 插件」或 Web「插件」工作区导入 `.zip`（或开发期填入本机目录 `localDir`）并启用：
    - 验证能力角标显示准确；含 `widget` 的扩展启用后确认主窗口自动出现挂件，禁用后确认挂件移除且未拦截非挂件区域的点击；
    - 含 `page` 的扩展点击「打开页面」（Desktop 也可从「设置」左侧「插件页面」分组打开，Web 也可从左侧「插件」主工作区顶部切页栏打开）；验证样式、交互、设置持久化与关闭清理；
    - 含 `backend` 的扩展确认共享 Host 仅起 1 个子进程、多标签页/双端共享同一 PID 与数据、禁用后进程立即退出；
