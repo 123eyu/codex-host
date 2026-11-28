@@ -909,6 +909,24 @@ button.crumb:hover {
   z-index: 9;
 }
 
+/* A mouse selection dragged from the transcript (transcript-selection-drag.ts).
+   The seat's editable fields leave hit testing, so WebKit cannot collapse the
+   selection into one and focus it; over the rest of the seat (user-select:
+   none) the selection extends to the end of the flow, as before. The seat's
+   band counts as outside the scrollport, so the browser's selection autoscroll
+   starts once the pointer reaches the composer, as it would below a composer
+   outside the flow. The whole seat stays hit-testable: with nothing under it
+   at the flow's end, WebKit resolves a point there to a position far above. */
+.scrollBody[data-selection-drag] {
+  scroll-padding-bottom: var(--dsh-composer-height, 0px);
+}
+
+.scrollBody[data-selection-drag]
+  > .composerSeat
+  :is(input, textarea, [contenteditable="true"], [contenteditable=""]) {
+  pointer-events: none;
+}
+
 /* Views may opt into a composer overlay while ConversationRoot retains
    ownership of the seat geometry and its active-phase precedence. */
 .scrollBody:has([data-conversation-composer-overlay]) {

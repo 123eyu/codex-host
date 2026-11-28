@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 import type { WorkspaceId } from "@deepseek-ai/dsh-workspace/types";
 import { workspaceDisplayTitle } from "@deepseek-ai/dsh-api-workspace-controller/default-workspace";
@@ -9,6 +9,7 @@ import type {
 } from "../contract/slots.ts";
 import { HeroShell, WorkspaceChip, workspaceLabel } from "./EmptyHero.tsx";
 import { ThreadReferenceDropTarget } from "./ThreadReferenceDropTarget.tsx";
+import { trackTranscriptSelectionDrag } from "./transcript-selection-drag.ts";
 import css from "./ConversationRoot.module.css";
 
 function ConversationSessionView({ renderSlot }: ConversationViewsProps) {
@@ -101,6 +102,11 @@ export function ConversationContent(props: ConversationContentProps) {
     seatObserver.current.observe(seat);
     seatObserver.current.observe(scroller);
   }, []);
+
+  useEffect(() => {
+    const scroller = body?.querySelector<HTMLElement>(":scope > [data-conversation-scroll]");
+    return scroller == null ? undefined : trackTranscriptSelectionDrag(scroller);
+  }, [body]);
 
   const sessionWorkspace =
     sessionId === undefined
