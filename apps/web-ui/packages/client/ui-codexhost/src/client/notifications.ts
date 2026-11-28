@@ -165,11 +165,32 @@ export async function sendTestNotification(
   return (await pushApi.test(subscription.endpoint)).sent > 0;
 }
 
-/** Keep the service worker installed so notification clicks can reach the app. */
+/**
+ * Keep the service worker installed in browser/PWA mode so notification clicks can reach the app.
+ * In native shell mode (which uses native OS notifications and connection recovery), proactively
+ * unregister any legacy service worker so WKWebView does not retain an extra worker VM or intercept
+ * every fetch().
+ */
 export function ensureServiceWorker(targetWindow?: Window): void {
   const win = resolveWindow(targetWindow);
-  if (win === undefined || getShellNotificationBridge(win) !== undefined) return;
-  if (!("serviceWorker" in win.navigator)) return;
+  if (win === undefined || !("serviceWorker" in win.navigator)) return;
+  if (getShellNotificationBridge(win) !== undefined) {
+    const sw = win.navigator.serviceWorker;
+    if (typeof sw.getRegistrations === "function") {
+      void sw
+        .getRegistrations()
+        .then((registrations) =>
+          Promise.all(registrations.map((reg) => reg.unregister().catch(() => false))),
+        )
+        .catch(() => undefined);
+    } else if (typeof sw.getRegistration === "function") {
+      void sw
+        .getRegistration("./")
+        .then((reg) => reg?.unregister().catch(() => false))
+        .catch(() => undefined);
+    }
+    return;
+  }
   void registration(win).catch(() => undefined);
 }
 

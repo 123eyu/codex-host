@@ -130,6 +130,16 @@ const LIST_IGNORED_PROJECTION_KEYS: ReadonlySet<string> = new Set([
   "turnOutline",
   "sessionStats",
   "compacting",
+  "goal",
+  "agentPreset",
+  "plan",
+  "todos",
+  "permissions",
+  "nativePermissions",
+  "modelSelection",
+  "attachmentInput",
+  "imageLimits",
+  "sentMessageEdit",
 ]);
 
 /** Instance cluster + frame entry + the session list. */

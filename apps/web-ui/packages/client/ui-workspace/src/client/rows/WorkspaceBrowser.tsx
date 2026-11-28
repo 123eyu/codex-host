@@ -792,6 +792,14 @@ function SessionTree({
     setGroupExpanded(group.key, !group.expanded);
   };
 
+  const archivedSessionSet = useMemo(
+    () => new Set(rowState.archivedSessionIds),
+    [rowState.archivedSessionIds],
+  );
+  const workspaceById = useMemo(
+    () => new Map(allWorkspaces.map((item) => [item.workspaceId, item])),
+    [allWorkspaces],
+  );
   const pinnedRows = useMemo(
     () =>
       deriveFlat(list, rowState.pinnedSessionIds, rowState, statuses, forestRoots).filter(
@@ -850,7 +858,20 @@ function SessionTree({
           ? `linked:${group.key}:${id}`
           : `session:${id}`;
     for (const node of sessions) rowKeys.push(rowKeyOf(node.id));
-    const history = localWorkspace
+    const matchesArchiveFilter = (id: string): boolean => {
+      if (rowState.archivedFilter === "show") return true;
+      if (rowState.archivedFilter === "only") return archivedSessionSet.has(id);
+      return !archivedSessionSet.has(id);
+    };
+    const remoteWorkspaceHasUnloaded =
+      group.remote &&
+      workspaceId !== undefined &&
+      (workspaceById
+        .get(workspaceId)
+        ?.sessionIds.some((id) => list.byId[id] === undefined && matchesArchiveFilter(id)) ??
+        false);
+    const pagedWorkspace = localWorkspace || remoteWorkspaceHasUnloaded;
+    const history = pagedWorkspace
       ? (list.workspaceHistory?.[workspaceId] ??
         (list.canSearchWorkspaceHistory ? "search" : "done"))
       : undefined;
@@ -1099,7 +1120,7 @@ function SessionTree({
                   history === undefined ? !group.remote && list.loading : history === "loading"
                 }
                 workspaceHistory={history}
-                workspaceId={localWorkspace ? workspaceId : undefined}
+                workspaceId={pagedWorkspace ? workspaceId : undefined}
                 fillWorkspace={
                   localWorkspace &&
                   workspaceReady &&
