@@ -1,17 +1,20 @@
-/** Per-mount cache keys for owner-resolved local Markdown images. */
+/** Retry/reload cache-busting keys for owner-resolved local Markdown images. */
 let imageLoads = 0;
 
 // Tree-position IDs can repeat between sessions; a module counter cannot.
 export const nextImageLoad = (): number => ++imageLoads;
 
 /**
- * Browsers may reuse a same-URL image within a document despite `no-store`.
- * A mounted image keeps its load tag across renders; a new mount reads fresh bytes.
+ * Append a cache-busting `load` tag to an owner-resolved local image URL when
+ * retrying after a load failure or performing an explicit reload. Normal mounts
+ * omit `load` (or pass `0`) so WebKit/browsers keep a single cached entry per
+ * URL and revalidate via `ETag` / `304 Not Modified`.
  * @param url - Owner-resolved absolute URL; authored remote URLs do not use this helper.
- * @param load - Number allocated once per mounted image or image-file link.
- * @returns The URL with a load tag, preserving data/blob URLs and existing query encoding.
+ * @param load - Optional positive retry/reload counter; absent or non-positive keeps `url` stable.
+ * @returns The stable URL by default, or the URL with a `load` tag preserving data/blob URLs and existing query encoding.
  */
-export function freshImageUrl(url: string, load: number): string {
+export function freshImageUrl(url: string, load?: number): string {
+  if (load === undefined || !Number.isFinite(load) || load <= 0) return url;
   let fresh: URL;
   try {
     fresh = new URL(url);
@@ -19,6 +22,6 @@ export function freshImageUrl(url: string, load: number): string {
     return url;
   }
   if (fresh.protocol === "data:" || fresh.protocol === "blob:") return url;
-  fresh.search = `${fresh.search === "" ? "?" : `${fresh.search}&`}load=${load}`;
+  fresh.search = `${fresh.search === "" ? "?" : `${fresh.search}&`}load=${Math.floor(load)}`;
   return fresh.href;
 }

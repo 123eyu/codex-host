@@ -101,19 +101,17 @@ function vocabularyImageUrl(url: string): string | undefined {
  * caller.
  * @param url - The authored markdown destination.
  * @param pathImages - Rewriting vocabulary, when the render pass has one.
- * @param load - The mounted image's load tag for rewritten URLs.
- * @returns The displayable image URL, or undefined.
+ * @returns The displayable image URL and whether it supports cache-busted error retries, or undefined.
  */
 function imageSource(
   url: string,
   pathImages: MarkdownPathImages | undefined,
-  load: number,
-): string | undefined {
+): { readonly src: string; readonly cacheBustable: boolean } | undefined {
   const remote = remoteImageUrl(sanitizeMarkdownUrl(normalizeUri(url)));
-  if (remote !== undefined) return remote;
+  if (remote !== undefined) return { src: remote, cacheBustable: false };
   const rewritten = pathImages?.resolve(url);
   const allowed = rewritten === undefined ? undefined : vocabularyImageUrl(rewritten);
-  return allowed === undefined ? undefined : freshImageUrl(allowed, load);
+  return allowed === undefined ? undefined : { src: allowed, cacheBustable: true };
 }
 
 /** Link/image reference targets collected from a document (first definition per identifier wins, as in CommonMark). */
@@ -168,7 +166,8 @@ export interface MarkdownPathImages {
    * @param value - The destination exactly as the markdown author wrote it.
    * @returns A displayable absolute URL, or undefined when the destination
    * names no displayable image — it then stays inert alt text. Non-data/blob
-   * URLs receive a per-mount `load` query parameter.
+   * URLs keep their stable URL on mount and append a `load` query parameter
+   * only when retrying after a load error.
    */
   resolve(value: string): string | undefined;
 }
@@ -796,12 +795,10 @@ function MarkdownFileLink({
   readonly children: ReactNode[];
 }): ReactNode {
   const { openFile, onLinkContextMenu, fileImages } = useMarkdownDelegate();
-  const [load] = useState(nextImageLoad);
   if (openFile === undefined) return <>{children}</>;
   // Pure-image anchors already contain their preview and keep one navigation target.
   const preview = glyph && classifyLinkPath(file.path) === "image" ? fileImages : undefined;
-  const resolved = preview?.resolve(file.path);
-  const src = resolved === undefined ? undefined : freshImageUrl(resolved, load);
+  const src = preview?.resolve(file.path);
   const anchor = (
     <button
       type="button"
@@ -899,18 +896,18 @@ function MarkdownImage({
   standalone: boolean;
 }): ReactNode {
   const { fileImages } = useMarkdownDelegate();
-  const [load] = useState(nextImageLoad);
   const file = streaming ? undefined : parseFileLink(destination);
   const resolved = file === undefined ? undefined : fileImages?.resolve(file.path);
-  const src =
+  const source =
     resolved === undefined
-      ? imageSource(destination, pathImages, load)
-      : freshImageUrl(resolved, load);
-  if (src === undefined) return <span className={css.imageAlt}>{alt}</span>;
+      ? imageSource(destination, pathImages)
+      : { src: resolved, cacheBustable: true };
+  if (source === undefined) return <span className={css.imageAlt}>{alt}</span>;
   return (
     <LoadedMarkdownImage
-      key={src}
-      src={src}
+      key={source.src}
+      src={source.src}
+      cacheBustable={source.cacheBustable}
       alt={alt}
       destination={destination}
       preview={inLink ? undefined : fileImages}
@@ -921,20 +918,37 @@ function MarkdownImage({
 
 function LoadedMarkdownImage({
   src,
+  cacheBustable,
   alt,
   destination,
   preview,
   standalone,
 }: {
   src: string;
+  cacheBustable: boolean;
   alt: string;
   destination: string;
   preview: ReturnType<typeof useMarkdownDelegate>["fileImages"];
   standalone: boolean;
 }): ReactNode {
   const [status, setStatus] = useState<"loading" | "ready" | "revealed" | "failed">("loading");
+  const [retryLoad, setRetryLoad] = useState<number | undefined>(undefined);
   const [open, setOpen] = useState(false);
+  const effectiveSrc =
+    cacheBustable && retryLoad !== undefined ? freshImageUrl(src, retryLoad) : src;
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const srcRef = useRef(effectiveSrc);
+  srcRef.current = effectiveSrc;
+  const attachImgRef = useCallback((node: HTMLImageElement | null) => {
+    const prev = imgRef.current;
+    imgRef.current = node;
+    if (prev !== null && prev !== node) {
+      prev.removeAttribute("src");
+    }
+    if (node !== null && !node.hasAttribute("src")) {
+      node.src = srcRef.current;
+    }
+  }, []);
   const close = useCallback(() => {
     setOpen(false);
   }, []);
@@ -943,7 +957,7 @@ function LoadedMarkdownImage({
     if (el !== null && el.complete && el.naturalWidth > 0) {
       setStatus("ready");
     }
-  }, [src]);
+  }, [effectiveSrc]);
   if (status === "failed")
     return (
       <span className={css.imageAlt}>
@@ -955,18 +969,27 @@ function LoadedMarkdownImage({
   const framed = preview !== undefined || standalone;
   const img = (
     <img
-      ref={imgRef}
+      ref={attachImgRef}
       className={clsx(
         css.image,
         framed && loading && css.imageLoading,
         status === "revealed" && css.imageReveal,
       )}
-      src={src}
+      src={effectiveSrc}
       alt={alt}
-      onLoad={() => {
+      onLoad={(event) => {
+        if (imgRef.current !== event.currentTarget) return;
         setStatus((current) => (current === "loading" ? "revealed" : current));
       }}
-      onError={() => {
+      onError={(event) => {
+        if (imgRef.current !== event.currentTarget) return;
+        if (cacheBustable && retryLoad === undefined) {
+          const load = nextImageLoad();
+          if (freshImageUrl(src, load) !== effectiveSrc) {
+            setRetryLoad(load);
+            return;
+          }
+        }
         setStatus("failed");
       }}
       loading="lazy"
@@ -1018,7 +1041,9 @@ function LoadedMarkdownImage({
         {placeholder}
         {img}
       </button>
-      {open && <ImageLightbox src={src} alt={alt} labels={preview.labels} onClose={close} />}
+      {open && (
+        <ImageLightbox src={effectiveSrc} alt={alt} labels={preview.labels} onClose={close} />
+      )}
     </>
   );
 }

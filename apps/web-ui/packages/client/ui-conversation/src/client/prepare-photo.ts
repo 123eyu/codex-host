@@ -21,7 +21,11 @@ function renderToCanvas(bitmap: ImageBitmap, width: number, height: number): Can
   ) {
     const canvas = new OffscreenCanvas(width, height);
     const context = canvas.getContext("2d");
-    if (context === null) return null;
+    if (context === null) {
+      canvas.width = 0;
+      canvas.height = 0;
+      return null;
+    }
     context.drawImage(bitmap, 0, 0, width, height);
     return canvas;
   }
@@ -30,7 +34,11 @@ function renderToCanvas(bitmap: ImageBitmap, width: number, height: number): Can
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext("2d");
-  if (context === null) return null;
+  if (context === null) {
+    canvas.width = 0;
+    canvas.height = 0;
+    return null;
+  }
   context.drawImage(bitmap, 0, 0, width, height);
   return canvas;
 }
@@ -58,6 +66,7 @@ async function encodeCanvas(
 export async function preparePhoto(file: File): Promise<File> {
   if (!isPreparablePhotoType(file.type)) return file;
   let bitmap: ImageBitmap | undefined;
+  let canvas: CanvasSurface | null = null;
   try {
     bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
     const edge = Math.max(bitmap.width, bitmap.height);
@@ -65,7 +74,7 @@ export async function preparePhoto(file: File): Promise<File> {
     const scale = Math.min(1, MAX_EDGE / edge);
     const width = Math.max(1, Math.round(bitmap.width * scale));
     const height = Math.max(1, Math.round(bitmap.height * scale));
-    const canvas = renderToCanvas(bitmap, width, height);
+    canvas = renderToCanvas(bitmap, width, height);
     if (canvas === null) return file;
 
     if (file.type === "image/png") {
@@ -102,6 +111,10 @@ export async function preparePhoto(file: File): Promise<File> {
   } catch {
     return file;
   } finally {
+    if (canvas !== null) {
+      canvas.width = 0;
+      canvas.height = 0;
+    }
     bitmap?.close();
   }
 }

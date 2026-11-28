@@ -102,11 +102,27 @@ function browserDraftAttachment(file: File): ComposerImageAttachment {
 function probeDimensions(attachment: ComposerImageAttachment): void {
   if (typeof Image !== "function") return;
   const probe = new Image();
-  probe.onload = () => {
-    attachment.width = probe.naturalWidth;
-    attachment.height = probe.naturalHeight;
+  const cleanup = (): void => {
+    probe.onload = null;
+    probe.onerror = null;
+    probe.src = "";
   };
-  probe.src = attachment.previewUrl;
+  probe.onload = () => {
+    try {
+      attachment.width = probe.naturalWidth;
+      attachment.height = probe.naturalHeight;
+    } finally {
+      cleanup();
+    }
+  };
+  probe.onerror = () => {
+    cleanup();
+  };
+  try {
+    probe.src = attachment.previewUrl;
+  } catch {
+    cleanup();
+  }
 }
 
 /** Give the echo one paint opportunity without letting a throttled frame clock block admission. */
@@ -395,6 +411,8 @@ export class ConversationController extends Service implements IConversation {
           blob: entry.imageFile,
           name: entry.file.name,
           bytes: entry.file.bytes,
+          ...(image.width === undefined ? {} : { width: image.width }),
+          ...(image.height === undefined ? {} : { height: image.height }),
         });
       } else {
         attachment = {
@@ -525,6 +543,8 @@ export class ConversationController extends Service implements IConversation {
             blob: file,
             name: result.value.file.name,
             bytes: result.value.file.bytes,
+            ...(attachment.width === undefined ? {} : { width: attachment.width }),
+            ...(attachment.height === undefined ? {} : { height: attachment.height }),
           });
         }
         this.fileUploads.update((draft) => {
