@@ -5,6 +5,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 const DEFAULT_COOLDOWN_MINUTES = 10;
+const DEFAULT_STALE_DAYS = 7;
+const MS_PER_DAY = 86_400_000;
 const DEFAULT_STATE_PATH = path.resolve(".codexhost/loop/state.json");
 
 const SKIP_LABELS = new Set(["暂缓", "on-hold", "automation:ignore"]);
@@ -39,6 +41,7 @@ const DOC_OR_TEST_PATTERNS = [
 function parseArgs(argv) {
   const args = {
     cooldownMinutes: DEFAULT_COOLDOWN_MINUTES,
+    staleDays: DEFAULT_STALE_DAYS,
     statePath: DEFAULT_STATE_PATH,
     exitCode: false,
     includeIssues: true,
@@ -61,6 +64,8 @@ function parseArgs(argv) {
       args.roundInc = true;
     } else if (token === "--cooldown-minutes") {
       args.cooldownMinutes = Number(argv[++i]);
+    } else if (token === "--stale-days") {
+      args.staleDays = Number(argv[++i]);
     } else if (token === "--state-path") {
       args.statePath = path.resolve(argv[++i]);
     } else if (token === "--mark-pr") {
@@ -88,7 +93,7 @@ function parseArgs(argv) {
 
 function printUsage() {
   console.log(`Usage:
-  node tools/repo-loop-preflight.mjs [--cooldown-minutes 10] [--no-issues] [--exit-code]
+  node tools/repo-loop-preflight.mjs [--cooldown-minutes 10] [--stale-days 7] [--no-issues] [--exit-code]
   node tools/repo-loop-preflight.mjs --mark-pr <num> --sha <oid> --status <status> [--round-inc] [--note <text>]
   node tools/repo-loop-preflight.mjs --mark-issue <num> --updated-at <iso> --status <status> [--note <text>]`);
 }
@@ -127,7 +132,18 @@ function runGhJson(ghArgs) {
   return JSON.parse(stdout || "[]");
 }
 
-function classifyPr(pr, previousEntry, nowMs, cooldownMinutes) {
+function computeStaleDays(nowMs, updatedAtIso, lastCheckedAtIso) {
+  const updatedMs = Date.parse(updatedAtIso ?? "");
+  const checkedMs = Date.parse(lastCheckedAtIso ?? "");
+  const latestTouchMs = Math.max(
+    Number.isFinite(updatedMs) ? updatedMs : 0,
+    Number.isFinite(checkedMs) ? checkedMs : 0,
+  );
+  if (latestTouchMs <= 0) return 0;
+  return Math.max(0, Math.floor((nowMs - latestTouchMs) / MS_PER_DAY));
+}
+
+function classifyPr(pr, previousEntry, nowMs, cooldownMinutes, staleDaysThreshold) {
   const labels = (pr.labels ?? []).map((l) => l.name);
   const skipLabel = labels.find((name) => SKIP_LABELS.has(name));
   if (pr.isDraft) {
@@ -138,11 +154,17 @@ function classifyPr(pr, previousEntry, nowMs, cooldownMinutes) {
   }
 
   const headSha = pr.headRefOid;
+  const staleDays = computeStaleDays(nowMs, pr.updatedAt, previousEntry?.lastCheckedAt);
+  let staleReason = null;
+
   if (previousEntry?.reviewedSha === headSha) {
-    return {
-      actionable: false,
-      reason: `unchanged:${previousEntry.status ?? "reviewed"}`,
-    };
+    if (staleDays < staleDaysThreshold) {
+      return {
+        actionable: false,
+        reason: `unchanged:${previousEntry.status ?? "reviewed"}`,
+      };
+    }
+    staleReason = "unchanged-stale";
   }
 
   const detail = runGhJson([
@@ -157,7 +179,7 @@ function classifyPr(pr, previousEntry, nowMs, cooldownMinutes) {
   const lastActivityIso = latestCommit?.committedDate ?? pr.updatedAt;
   const lastActivityMs = Date.parse(lastActivityIso);
 
-  if (labels.includes("awaiting-author")) {
+  if (!staleReason && labels.includes("awaiting-author")) {
     const authorLogin = pr.author?.login ?? "";
     const feedbackTimestamps = [
       ...(Array.isArray(detail.reviews) ? detail.reviews : []).map((r) => r.submittedAt),
@@ -170,16 +192,19 @@ function classifyPr(pr, previousEntry, nowMs, cooldownMinutes) {
       return Number.isFinite(ts) && ts > max ? ts : max;
     }, 0);
     if (latestFeedbackMs > 0 && lastActivityMs <= latestFeedbackMs) {
-      return {
-        actionable: false,
-        reason: "awaiting-author:no-new-commits",
-      };
+      if (staleDays < staleDaysThreshold) {
+        return {
+          actionable: false,
+          reason: "awaiting-author:no-new-commits",
+        };
+      }
+      staleReason = "awaiting-author-stale";
     }
   }
 
   const minutesSinceActivity = Math.max(0, Math.floor((nowMs - lastActivityMs) / 60_000));
 
-  if (minutesSinceActivity < cooldownMinutes) {
+  if (!staleReason && minutesSinceActivity < cooldownMinutes) {
     return {
       actionable: false,
       reason: `cooldown:${minutesSinceActivity}m<${cooldownMinutes}m`,
@@ -219,6 +244,9 @@ function classifyPr(pr, previousEntry, nowMs, cooldownMinutes) {
       previousSha: previousEntry?.reviewedSha ?? null,
       isIncremental,
       diffRange: isIncremental ? `${previousEntry.reviewedSha}..${headSha}` : null,
+      isStale: Boolean(staleReason),
+      staleDays: staleReason ? staleDays : 0,
+      staleReason,
       rounds,
       circuitBreakerHit: rounds >= 2,
       tier,
@@ -303,7 +331,7 @@ function runPreflight(args) {
 
   for (const pr of openPrs) {
     const previousEntry = state.prs[String(pr.number)];
-    const result = classifyPr(pr, previousEntry, nowMs, args.cooldownMinutes);
+    const result = classifyPr(pr, previousEntry, nowMs, args.cooldownMinutes, args.staleDays);
     if (result.actionable) {
       actionablePrs.push(result.item);
     } else {
@@ -315,9 +343,10 @@ function runPreflight(args) {
     }
   }
 
-  // Prioritize incremental re-reviews and smaller L1 PRs first
+  // Prioritize active PRs before stale ones, then incremental and smaller tiers
   const tierRank = { L1: 1, L2: 2, L3: 3 };
   actionablePrs.sort((a, b) => {
+    if (a.isStale !== b.isStale) return a.isStale ? 1 : -1;
     if (a.isIncremental !== b.isIncremental) return a.isIncremental ? -1 : 1;
     return (tierRank[a.tier] ?? 9) - (tierRank[b.tier] ?? 9);
   });
@@ -330,7 +359,7 @@ function runPreflight(args) {
       "--state",
       "open",
       "--limit",
-      "30",
+      "100",
       "--json",
       "number,title,author,labels,updatedAt,createdAt",
     ]);
@@ -339,7 +368,11 @@ function runPreflight(args) {
       const labels = (issue.labels ?? []).map((l) => l.name);
       if (labels.some((name) => SKIP_LABELS.has(name))) continue;
       const previous = state.issues[String(issue.number)];
-      if (previous?.updatedAt === issue.updatedAt) continue;
+      const staleDays = computeStaleDays(nowMs, issue.updatedAt, previous?.lastCheckedAt);
+      const isStale = Boolean(
+        previous?.updatedAt === issue.updatedAt && staleDays >= args.staleDays,
+      );
+      if (previous?.updatedAt === issue.updatedAt && !isStale) continue;
       actionableIssues.push({
         number: issue.number,
         title: issue.title,
@@ -347,6 +380,8 @@ function runPreflight(args) {
         updatedAt: issue.updatedAt,
         labels,
         previousStatus: previous?.status ?? null,
+        isStale,
+        staleDays: isStale ? staleDays : 0,
       });
     }
   }
@@ -355,6 +390,7 @@ function runPreflight(args) {
   const output = {
     checkedAt: new Date(nowMs).toISOString(),
     cooldownMinutes: args.cooldownMinutes,
+    staleDays: args.staleDays,
     hasWork,
     summary: {
       actionablePrCount: actionablePrs.length,
