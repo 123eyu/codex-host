@@ -6,6 +6,7 @@ mod notifications;
 mod readiness;
 mod tray;
 mod visibility;
+mod web_content_recovery;
 mod zoom;
 
 use std::sync::mpsc::{self, Sender};
@@ -28,13 +29,16 @@ use notifications::{
 };
 use readiness::{ShellReady, WebEvent, WebReady};
 use visibility::{WindowVisibility, WindowVisibilityState, compute_window_hidden};
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+use web_content_recovery::RecoveryAction;
+use web_content_recovery::WebContentRecovery;
 use zoom::{ZoomController, ZoomState, percent_to_scale};
 
 pub(crate) const MAIN: &str = "main";
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum Status {
+pub(crate) enum Status {
     Starting,
     Reconnecting,
     Error,
@@ -64,7 +68,7 @@ struct WebAccessInfo {
     web_login_url: String,
 }
 
-enum Page {
+pub(crate) enum Page {
     Onboarding,
     Dormant,
     Loading(Status, Option<String>),
@@ -81,6 +85,7 @@ struct View {
     page: Page,
     last_login: Option<Url>,
     pending_route: Option<String>,
+    web_content_recovery: WebContentRecovery,
 }
 
 struct Shell {
@@ -136,6 +141,83 @@ fn navigate_loading(app: &AppHandle, status: Status) {
     navigate(app, url);
 }
 
+fn navigate_onboarding(app: &AppHandle) {
+    let zoom = app.state::<Shell>().zoom.lock().unwrap().percent();
+    let mut url = embedded(ONBOARDING);
+    url.set_query(Some(&format!("zoom={zoom}")));
+    navigate(app, url);
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn handle_web_content_process_terminate(webview: &tauri::Webview) {
+    if webview.label() != MAIN {
+        return;
+    }
+    let app = webview.app_handle();
+    let Some(shell) = app.try_state::<Shell>() else {
+        return;
+    };
+    if shell.launcher.is_stopping() {
+        return;
+    }
+    let current_url = webview.url().ok();
+    let (action, fallback_login) = {
+        let mut view_guard = shell.view.lock().unwrap();
+        let view = &mut *view_guard;
+        let fallback_login = view.last_login.clone();
+        let action = view.web_content_recovery.decide(
+            &view.page,
+            fallback_login.as_ref(),
+            current_url.as_ref(),
+            Instant::now(),
+        );
+        if let RecoveryAction::TripCircuitBreaker(ref message) = action {
+            view.page = Page::Loading(Status::Error, Some(message.clone()));
+        }
+        (action, fallback_login)
+    };
+    match action {
+        RecoveryAction::Ignore => (),
+        RecoveryAction::ReloadCurrentWeb => {
+            eprintln!("CodexHost: WKWebView WebContent process terminated; reloading active page");
+            if let Err(error) = webview.reload() {
+                eprintln!("CodexHost: could not reload WKWebView after termination: {error}");
+                if let Some(login) = fallback_login {
+                    navigate(app, login);
+                } else {
+                    begin_web(app, true);
+                }
+            }
+        }
+        RecoveryAction::NavigateWebLogin(login) => {
+            eprintln!(
+                "CodexHost: WKWebView WebContent process terminated; restoring Web login URL"
+            );
+            navigate(app, login);
+        }
+        RecoveryAction::RestartWeb => {
+            eprintln!("CodexHost: WKWebView WebContent process terminated; restarting Web startup");
+            begin_web(app, true);
+        }
+        RecoveryAction::ReloadLoading(status) => {
+            eprintln!("CodexHost: WKWebView WebContent process terminated; reloading loading page");
+            navigate_loading(app, status);
+        }
+        RecoveryAction::ReloadOnboarding => {
+            eprintln!(
+                "CodexHost: WKWebView WebContent process terminated; reloading onboarding page"
+            );
+            navigate_onboarding(app);
+        }
+        RecoveryAction::TripCircuitBreaker(_) => {
+            eprintln!(
+                "CodexHost: WKWebView WebContent process terminated repeatedly; stopping auto-reload"
+            );
+            navigate_loading(app, Status::Error);
+        }
+    }
+}
+
 fn begin_web(app: &AppHandle, replace_page: bool) {
     let shell = app.state::<Shell>();
     if shell.launcher.is_stopping() {
@@ -166,6 +248,7 @@ fn web_event(app: &AppHandle, event: WebEvent) {
         WebEvent::Connected(ready) => {
             view.page = Page::Web;
             view.last_login = Some(ready.login_url.clone());
+            view.web_content_recovery.clear_tripped();
             let mut url = ready.login_url;
             if let Some(route) = view.pending_route.take() {
                 navigation::apply_host_route(&mut url, &route);
@@ -331,6 +414,9 @@ pub(crate) fn show_main(app: &AppHandle, route: Option<&str>) {
     let mut view = shell.view.lock().unwrap();
     let begin = matches!(view.page, Page::Dormant)
         || (matches!(view.page, Page::Onboarding) && route.is_some());
+    if begin {
+        view.web_content_recovery.reset();
+    }
     let mut target = None;
     if let Some(route) = route {
         if matches!(view.page, Page::Web) {
@@ -361,11 +447,9 @@ pub(crate) fn show_onboarding(app: &AppHandle) {
     let mut view = shell.view.lock().unwrap();
     view.page = Page::Onboarding;
     view.pending_route = None;
+    view.web_content_recovery.reset();
     drop(view);
-    let zoom = shell.zoom.lock().unwrap().percent();
-    let mut url = embedded(ONBOARDING);
-    url.set_query(Some(&format!("zoom={zoom}")));
-    navigate(app, url);
+    navigate_onboarding(app);
     set_visible(app, true);
 }
 
@@ -448,10 +532,10 @@ async fn open_console(shell: State<'_, Shell>) -> Result<(), String> {
 
 #[tauri::command]
 fn retry(app: AppHandle, shell: State<'_, Shell>) {
-    if matches!(
-        shell.view.lock().unwrap().page,
-        Page::Loading(Status::Error, _)
-    ) {
+    let mut view = shell.view.lock().unwrap();
+    if matches!(view.page, Page::Loading(Status::Error, _)) {
+        view.web_content_recovery.reset();
+        drop(view);
         begin_web(&app, true);
     }
 }
@@ -487,7 +571,10 @@ async fn choose_surface(
             return;
         }
         match surface {
-            Surface::NativeShell => begin_web(&on_main, true),
+            Surface::NativeShell => {
+                shell.view.lock().unwrap().web_content_recovery.reset();
+                begin_web(&on_main, true);
+            }
             Surface::CodexDesktop => {
                 shell.view.lock().unwrap().page = Page::Dormant;
                 set_visible(&on_main, false);
@@ -683,14 +770,21 @@ fn persist_latest_notifications(
     }
 }
 
+async fn query_notification_permission(app: &AppHandle) -> NotificationPermission {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || notifications::permission_state(&app))
+        .await
+        .unwrap_or(NotificationPermission::Unsupported)
+}
+
 #[tauri::command]
-fn notification_get_state(
+async fn notification_get_state(
     app: AppHandle,
     window: tauri::WebviewWindow,
     shell: State<'_, Shell>,
 ) -> Result<NotificationStatePayload, String> {
     require_live_web_window(&window, &shell)?;
-    let permission = notifications::permission_state(&app);
+    let permission = query_notification_permission(&app).await;
     let mut controller = shell.notifications.lock().unwrap();
     controller.sync_background_activity(permission);
     Ok(NotificationStatePayload {
@@ -700,14 +794,19 @@ fn notification_get_state(
 }
 
 #[tauri::command]
-fn notification_request_permission(
+async fn notification_request_permission(
     app: AppHandle,
     window: tauri::WebviewWindow,
     shell: State<'_, Shell>,
 ) -> Result<NotificationPermission, String> {
     require_live_web_window(&window, &shell)?;
     notifications::ensure_windows_aumid();
-    let permission = notifications::request_permission(&app)?;
+    let permission_app = app.clone();
+    let permission = tauri::async_runtime::spawn_blocking(move || {
+        notifications::request_permission(&permission_app)
+    })
+    .await
+    .map_err(|error| format!("Notification permission request failed: {error}"))??;
     shell
         .notifications
         .lock()
@@ -717,7 +816,7 @@ fn notification_request_permission(
 }
 
 #[tauri::command]
-fn notification_set_enabled(
+async fn notification_set_enabled(
     app: AppHandle,
     window: tauri::WebviewWindow,
     shell: State<'_, Shell>,
@@ -727,7 +826,7 @@ fn notification_set_enabled(
     if enabled {
         notifications::ensure_windows_aumid();
     }
-    let permission = notifications::permission_state(&app);
+    let permission = query_notification_permission(&app).await;
     let changed = shell
         .notifications
         .lock()
@@ -745,7 +844,7 @@ fn notification_set_enabled(
 }
 
 #[tauri::command]
-fn notification_send(
+async fn notification_send(
     app: AppHandle,
     window: tauri::WebviewWindow,
     shell: State<'_, Shell>,
@@ -755,7 +854,10 @@ fn notification_send(
     let Some(sanitized) = notifications::sanitize_payload(&payload) else {
         return Ok(false);
     };
-    if notifications::permission_state(&app) != NotificationPermission::Granted {
+    if !shell.notifications.lock().unwrap().enabled() {
+        return Ok(false);
+    }
+    if query_notification_permission(&app).await != NotificationPermission::Granted {
         return Ok(false);
     }
     let allowed = shell
@@ -766,7 +868,10 @@ fn notification_send(
     if !allowed {
         return Ok(false);
     }
-    notifications::show_native(&app, &sanitized)?;
+    let send_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || notifications::show_native(&send_app, &sanitized))
+        .await
+        .map_err(|error| format!("Notification delivery task failed: {error}"))??;
     Ok(true)
 }
 
@@ -840,9 +945,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let locale = sys_locale::get_locale().unwrap_or_else(|| "en".into());
     let (ensure_web, requests) = mpsc::channel();
     let onboarding = options.onboarding;
-    let app = tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_notification::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.plugin(tauri_plugin_notification::init());
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let builder = builder.on_web_content_process_terminate(handle_web_content_process_terminate);
+    let app = builder
         .manage(instance)
         .manage(Shell {
             launcher: launcher.clone(),
@@ -854,6 +962,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 last_login: None,
                 pending_route: options.route,
+                web_content_recovery: WebContentRecovery::new(),
             }),
             ensure_web,
             locale: locale.clone(),
@@ -1016,12 +1125,19 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             notifications::ensure_windows_aumid();
             notifications::install_action_handler(&app_handle);
             {
-                let permission = notifications::permission_state(&app_handle);
-                app.state::<Shell>()
-                    .notifications
-                    .lock()
-                    .unwrap()
-                    .sync_background_activity(permission);
+                let sync_app = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let permission = query_notification_permission(&sync_app).await;
+                    if let Some(shell) = sync_app.try_state::<Shell>()
+                        && !shell.launcher.is_stopping()
+                    {
+                        shell
+                            .notifications
+                            .lock()
+                            .unwrap()
+                            .sync_background_activity(permission);
+                    }
+                });
             }
             tray::install(&app_handle, &locale)?;
             let ready = ShellReady::publish(&launcher.data_dir)?;

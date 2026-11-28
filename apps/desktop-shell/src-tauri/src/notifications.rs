@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
+#[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::{NotificationExt, PermissionState};
 
 pub(crate) const NOTIFICATIONS_FILE: &str = "desktop-shell-notifications-v1.json";
@@ -229,6 +230,7 @@ pub(crate) fn sanitize_payload(payload: &NotificationSendPayload) -> Option<Sani
     })
 }
 
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn map_permission_state(state: PermissionState) -> NotificationPermission {
     match state {
         PermissionState::Granted => NotificationPermission::Granted,
@@ -239,38 +241,233 @@ pub(crate) fn map_permission_state(state: PermissionState) -> NotificationPermis
     }
 }
 
+#[cfg(target_os = "macos")]
+mod macos_native {
+    use std::ffi::{CStr, CString, c_char, c_void};
+    use std::sync::{OnceLock, mpsc};
+    use std::time::Duration;
+
+    use tauri::AppHandle;
+
+    use super::{NotificationPermission, SanitizedNotification, dispatch_notification_click};
+
+    const CH_PERM_GRANTED: i32 = 0;
+    const CH_PERM_DENIED: i32 = 1;
+    const CH_PERM_PROMPT: i32 = 2;
+    const PERMISSION_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+    const DELIVERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+    type ClickCallback = extern "C" fn(session_id: *const c_char);
+    type PermissionCallback = extern "C" fn(ctx: *mut c_void, permission: i32);
+    type RequestPermissionCallback =
+        extern "C" fn(ctx: *mut c_void, permission: i32, error: *const c_char);
+    type ShowCallback = extern "C" fn(ctx: *mut c_void, error: *const c_char);
+
+    unsafe extern "C" {
+        fn codexhost_macos_notifications_install(on_click: ClickCallback);
+        fn codexhost_macos_notifications_get_permission(
+            ctx: *mut c_void,
+            callback: PermissionCallback,
+        );
+        fn codexhost_macos_notifications_request_permission(
+            ctx: *mut c_void,
+            callback: RequestPermissionCallback,
+        );
+        fn codexhost_macos_notifications_show(
+            title: *const c_char,
+            body: *const c_char,
+            tag: *const c_char,
+            session_id: *const c_char,
+            ctx: *mut c_void,
+            callback: ShowCallback,
+        );
+    }
+
+    static CLICK_APP: OnceLock<AppHandle> = OnceLock::new();
+
+    pub(super) fn map_native_permission(code: i32) -> NotificationPermission {
+        match code {
+            CH_PERM_GRANTED => NotificationPermission::Granted,
+            CH_PERM_DENIED => NotificationPermission::Denied,
+            CH_PERM_PROMPT => NotificationPermission::Prompt,
+            _ => NotificationPermission::Unsupported,
+        }
+    }
+
+    unsafe fn optional_c_str(ptr: *const c_char) -> Option<String> {
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: Caller passes a valid NUL-terminated UTF-8 string for the duration of the callback.
+        let value = unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned();
+        (!value.is_empty()).then_some(value)
+    }
+
+    extern "C" fn on_notification_click(session_id: *const c_char) {
+        let Some(app) = CLICK_APP.get() else {
+            return;
+        };
+        let session_id = unsafe { optional_c_str(session_id) };
+        dispatch_notification_click(app, session_id.as_deref());
+    }
+
+    extern "C" fn on_permission_result(ctx: *mut c_void, permission: i32) {
+        if ctx.is_null() {
+            return;
+        }
+        // SAFETY: `ctx` was created with `Box::into_raw` and is invoked exactly once by ObjC.
+        let tx = unsafe { Box::from_raw(ctx.cast::<mpsc::SyncSender<NotificationPermission>>()) };
+        let _ = tx.send(map_native_permission(permission));
+    }
+
+    extern "C" fn on_request_permission_result(
+        ctx: *mut c_void,
+        permission: i32,
+        error: *const c_char,
+    ) {
+        if ctx.is_null() {
+            return;
+        }
+        // SAFETY: `ctx` was created with `Box::into_raw` and is invoked exactly once by ObjC.
+        let tx = unsafe {
+            Box::from_raw(ctx.cast::<mpsc::SyncSender<Result<NotificationPermission, String>>>())
+        };
+        let result = match unsafe { optional_c_str(error) } {
+            Some(message) => Err(message),
+            None => Ok(map_native_permission(permission)),
+        };
+        let _ = tx.send(result);
+    }
+
+    extern "C" fn on_show_result(ctx: *mut c_void, error: *const c_char) {
+        if ctx.is_null() {
+            return;
+        }
+        // SAFETY: `ctx` was created with `Box::into_raw` and is invoked exactly once by ObjC.
+        let tx = unsafe { Box::from_raw(ctx.cast::<mpsc::SyncSender<Result<(), String>>>()) };
+        let result = match unsafe { optional_c_str(error) } {
+            Some(message) => Err(message),
+            None => Ok(()),
+        };
+        let _ = tx.send(result);
+    }
+
+    fn to_cstring_sanitized(value: &str) -> CString {
+        let cleaned = value.replace('\0', "");
+        CString::new(cleaned).expect("nul-stripped string")
+    }
+
+    pub(super) fn install_action_handler(app: &AppHandle) {
+        let _ = CLICK_APP.set(app.clone());
+        unsafe {
+            codexhost_macos_notifications_install(on_notification_click);
+        }
+    }
+
+    pub(super) fn permission_state() -> NotificationPermission {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let ctx = Box::into_raw(Box::new(tx)).cast::<c_void>();
+        unsafe {
+            codexhost_macos_notifications_get_permission(ctx, on_permission_result);
+        }
+        rx.recv_timeout(PERMISSION_QUERY_TIMEOUT)
+            .unwrap_or(NotificationPermission::Unsupported)
+    }
+
+    pub(super) fn request_permission() -> Result<NotificationPermission, String> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let ctx = Box::into_raw(Box::new(tx)).cast::<c_void>();
+        unsafe {
+            codexhost_macos_notifications_request_permission(ctx, on_request_permission_result);
+        }
+        rx.recv()
+            .unwrap_or_else(|_| Err("macOS notification permission request was cancelled".into()))
+    }
+
+    pub(super) fn show_native(sanitized: &SanitizedNotification) -> Result<(), String> {
+        let title = to_cstring_sanitized(&sanitized.title);
+        let body = to_cstring_sanitized(&sanitized.body);
+        let tag = sanitized.tag.as_deref().map(to_cstring_sanitized);
+        let session_id = sanitized.session_id.as_deref().map(to_cstring_sanitized);
+
+        let (tx, rx) = mpsc::sync_channel(1);
+        let ctx = Box::into_raw(Box::new(tx)).cast::<c_void>();
+        unsafe {
+            codexhost_macos_notifications_show(
+                title.as_ptr(),
+                body.as_ptr(),
+                tag.as_ref()
+                    .map_or(std::ptr::null(), |value| value.as_ptr()),
+                session_id
+                    .as_ref()
+                    .map_or(std::ptr::null(), |value| value.as_ptr()),
+                ctx,
+                on_show_result,
+            );
+        }
+        rx.recv_timeout(DELIVERY_TIMEOUT)
+            .unwrap_or_else(|_| Err("Timed out delivering macOS notification".into()))
+    }
+}
+
 pub(crate) fn permission_state(app: &AppHandle) -> NotificationPermission {
-    app.notification()
-        .permission_state()
-        .map(map_permission_state)
-        .unwrap_or(NotificationPermission::Unsupported)
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        macos_native::permission_state()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        app.notification()
+            .permission_state()
+            .map(map_permission_state)
+            .unwrap_or(NotificationPermission::Unsupported)
+    }
 }
 
 pub(crate) fn request_permission(app: &AppHandle) -> Result<NotificationPermission, String> {
-    app.notification()
-        .request_permission()
-        .map(map_permission_state)
-        .map_err(|error| error.to_string())
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        macos_native::request_permission()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        app.notification()
+            .request_permission()
+            .map(map_permission_state)
+            .map_err(|error| error.to_string())
+    }
 }
 
 pub(crate) fn show_native(
     app: &AppHandle,
     sanitized: &SanitizedNotification,
 ) -> Result<(), String> {
-    let mut builder = app.notification().builder();
-    if !sanitized.title.is_empty() {
-        builder = builder.title(sanitized.title.clone());
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        macos_native::show_native(sanitized)
     }
-    if !sanitized.body.is_empty() {
-        builder = builder.body(sanitized.body.clone());
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut builder = app.notification().builder();
+        if !sanitized.title.is_empty() {
+            builder = builder.title(sanitized.title.clone());
+        }
+        if !sanitized.body.is_empty() {
+            builder = builder.body(sanitized.body.clone());
+        }
+        if let Some(tag) = &sanitized.tag {
+            builder = builder.group(tag.clone());
+        }
+        if let Some(session_id) = &sanitized.session_id {
+            builder = builder.extra("sessionId", session_id.clone());
+        }
+        builder.show().map_err(|error| error.to_string())
     }
-    if let Some(tag) = &sanitized.tag {
-        builder = builder.group(tag.clone());
-    }
-    if let Some(session_id) = &sanitized.session_id {
-        builder = builder.extra("sessionId", session_id.clone());
-    }
-    builder.show().map_err(|error| error.to_string())
 }
 
 pub(crate) fn click_dispatch_script(payload: &NotificationClickPayload) -> String {
@@ -281,25 +478,41 @@ pub(crate) fn click_dispatch_script(payload: &NotificationClickPayload) -> Strin
     format!("window.__codexhostDispatchNotificationClick?.({json});")
 }
 
+pub(crate) fn sanitize_click_session_id(raw: Option<&str>) -> Option<String> {
+    raw.map(|value| truncate_chars(value, MAX_SESSION_ID_CHARS))
+        .filter(|value| !value.is_empty())
+}
+
+pub(crate) fn dispatch_notification_click(app: &AppHandle, raw_session_id: Option<&str>) {
+    let payload = NotificationClickPayload {
+        session_id: sanitize_click_session_id(raw_session_id),
+    };
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        crate::set_visible(&handle, true);
+        if let Some(window) = handle.get_webview_window(crate::MAIN) {
+            let _ = window.eval(click_dispatch_script(&payload));
+        }
+    });
+}
+
 pub(crate) fn install_action_handler(app: &AppHandle) {
-    let click_app = app.clone();
-    if let Err(error) = app.notification().on_action(move |performed| {
-        let session_id = performed
-            .notification()
-            .and_then(|notification| notification.extra().get("sessionId"))
-            .and_then(|value| value.as_str())
-            .map(|value| truncate_chars(value, MAX_SESSION_ID_CHARS))
-            .filter(|value| !value.is_empty());
-        let handle = click_app.clone();
-        let payload = NotificationClickPayload { session_id };
-        let _ = click_app.run_on_main_thread(move || {
-            crate::set_visible(&handle, true);
-            if let Some(window) = handle.get_webview_window(crate::MAIN) {
-                let _ = window.eval(click_dispatch_script(&payload));
-            }
-        });
-    }) {
-        eprintln!("CodexHost: could not register desktop notification click handler: {error}");
+    #[cfg(target_os = "macos")]
+    {
+        macos_native::install_action_handler(app);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let click_app = app.clone();
+        if let Err(error) = app.notification().on_action(move |performed| {
+            let session_id = performed
+                .notification()
+                .and_then(|notification| notification.extra().get("sessionId"))
+                .and_then(|value| value.as_str());
+            dispatch_notification_click(&click_app, session_id);
+        }) {
+            eprintln!("CodexHost: could not register desktop notification click handler: {error}");
+        }
     }
 }
 
@@ -440,6 +653,49 @@ mod tests {
         assert_eq!(
             click_dispatch_script(&NotificationClickPayload { session_id: None }),
             r#"window.__codexhostDispatchNotificationClick?.({});"#
+        );
+    }
+
+    #[test]
+    fn sanitizes_click_session_ids() {
+        assert_eq!(
+            sanitize_click_session_id(Some("  thread-42  ")),
+            Some("thread-42".into())
+        );
+        assert_eq!(sanitize_click_session_id(Some("   ")), None);
+        assert_eq!(sanitize_click_session_id(None), None);
+        let long_id = "s".repeat(MAX_SESSION_ID_CHARS + 20);
+        assert_eq!(
+            sanitize_click_session_id(Some(&long_id))
+                .unwrap()
+                .chars()
+                .count(),
+            MAX_SESSION_ID_CHARS
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn maps_macos_native_permission_codes() {
+        assert_eq!(
+            macos_native::map_native_permission(0),
+            NotificationPermission::Granted
+        );
+        assert_eq!(
+            macos_native::map_native_permission(1),
+            NotificationPermission::Denied
+        );
+        assert_eq!(
+            macos_native::map_native_permission(2),
+            NotificationPermission::Prompt
+        );
+        assert_eq!(
+            macos_native::map_native_permission(3),
+            NotificationPermission::Unsupported
+        );
+        assert_eq!(
+            macos_native::map_native_permission(99),
+            NotificationPermission::Unsupported
         );
     }
 }

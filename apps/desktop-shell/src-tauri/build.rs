@@ -5,6 +5,15 @@ fn main() {
             .file("src/macos_file_drop.m")
             .flag("-fobjc-arc")
             .compile("codexhost_file_drop");
+
+        println!("cargo:rerun-if-changed=src/macos_notifications.m");
+        cc::Build::new()
+            .file("src/macos_notifications.m")
+            .flag("-fobjc-arc")
+            .flag("-Wall")
+            .flag("-Wextra")
+            .compile("codexhost_macos_notifications");
+        println!("cargo:rustc-link-lib=framework=UserNotifications");
     }
     // Unbundled macOS debug runs (`npm start app`) need an embedded Info.plist
     // so WKWebView exposes `navigator.mediaDevices` for voice input.
