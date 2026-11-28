@@ -12,6 +12,7 @@ import {
 import { RemoteSessions, remoteSessionId } from "../src/remote-sessions.ts";
 import { remoteWorkspaceId } from "../src/remote-workspaces.ts";
 import { EventHub, RpcRegistry, StreamRegistry } from "../src/transport.ts";
+import { requestOf } from "../src/store.ts";
 
 it("selects bounded remote head page while preserving priorities, workspace previews, and ancestors", () => {
   const orderedIds = Array.from({ length: 120 }, (_, i) => `s-${String(i).padStart(3, "0")}`);
@@ -132,9 +133,7 @@ it("paginates remote sessions in session/list, supports remote workspace paging,
   const streams = new StreamRegistry();
   remote.install(rpc, streams);
   rpc.register("session/list", (args) => {
-    const req = (
-      typeof args.request === "object" && args.request !== null ? args.request : args
-    ) as { cursor?: unknown; workspaceId?: unknown };
+    const req = requestOf<{ cursor?: unknown; workspaceId?: unknown }>(args);
     localCursorCalls.push({ cursor: req.cursor, workspaceId: req.workspaceId });
     if (req.workspaceId === "local-ws-1") {
       return { items: [{ sessionId: "local-older" }], archivedSessionIds: [], nextCursor: null };
@@ -175,6 +174,17 @@ it("paginates remote sessions in session/list, supports remote workspace paging,
   assert.equal(localWsRes.ok, true);
   assert.deepEqual(
     localWsRes.value.items.map((i) => i.sessionId),
+    ["local-older"],
+  );
+  assert.equal(localCursorCalls.at(-1)?.cursor, "local-c1");
+
+  // 2b. Local workspace continuation also unwraps wire `_request` envelopes used by the Web client.
+  const localWsWireRes = (await rpc.dispatch("session/list", {
+    args: { _request: { cursor: headRes.value.nextCursor, workspaceId: "local-ws-1" } },
+  })) as { ok: true; value: { items: Array<{ sessionId: string }>; nextCursor: string | null } };
+  assert.equal(localWsWireRes.ok, true);
+  assert.deepEqual(
+    localWsWireRes.value.items.map((i) => i.sessionId),
     ["local-older"],
   );
   assert.equal(localCursorCalls.at(-1)?.cursor, "local-c1");

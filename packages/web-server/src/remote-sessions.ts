@@ -1909,13 +1909,13 @@ export class RemoteSessions {
       const entry = this.entries.get(pinnedId);
       if (entry && (includeArchived || !entry.archived)) priority.add(pinnedId);
     }
-    for (const item of this.pending.values()) {
-      const entry = this.entries.get(item.sessionId);
-      if (entry && (includeArchived || !entry.archived)) priority.add(item.sessionId);
-    }
     for (const [id, entry] of this.entries) {
       if (!includeArchived && entry.archived) continue;
-      if ((entry.online && entry.row.status.type === "active") || entry.view !== undefined) {
+      if (
+        (entry.online && entry.row.status.type === "active") ||
+        entry.view !== undefined ||
+        this.hasPendingInteraction(id, entry)
+      ) {
         priority.add(id);
       }
     }
@@ -2036,7 +2036,11 @@ export class RemoteSessions {
       const target = (
         typeof args.request === "object" && args.request !== null && !Array.isArray(args.request)
           ? args.request
-          : args
+          : typeof args._request === "object" &&
+              args._request !== null &&
+              !Array.isArray(args._request)
+            ? args._request
+            : args
       ) as Record<string, unknown>;
       const hadCursor = Object.hasOwn(target, "cursor");
       const previousCursor = target.cursor;

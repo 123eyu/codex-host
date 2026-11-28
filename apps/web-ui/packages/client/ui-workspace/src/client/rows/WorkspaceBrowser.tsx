@@ -858,12 +858,17 @@ function SessionTree({
           ? `linked:${group.key}:${id}`
           : `session:${id}`;
     for (const node of sessions) rowKeys.push(rowKeyOf(node.id));
+    const matchesArchiveFilter = (id: string): boolean => {
+      if (rowState.archivedFilter === "show") return true;
+      if (rowState.archivedFilter === "only") return archivedSessionSet.has(id);
+      return !archivedSessionSet.has(id);
+    };
     const remoteWorkspaceHasUnloaded =
       group.remote &&
       workspaceId !== undefined &&
       (workspaceById
         .get(workspaceId)
-        ?.sessionIds.some((id) => list.byId[id] === undefined && !archivedSessionSet.has(id)) ??
+        ?.sessionIds.some((id) => list.byId[id] === undefined && matchesArchiveFilter(id)) ??
         false);
     const pagedWorkspace = localWorkspace || remoteWorkspaceHasUnloaded;
     const history = pagedWorkspace
@@ -1439,14 +1444,6 @@ function FlatList({
         (node) => !node.pinned && !rowState.sectionedSessionIds?.has(node.id),
       ),
     [list, sessionIds, rowState, statuses, forestRoots],
-  );
-  const archivedSessionSet = useMemo(
-    () => new Set(rowState.archivedSessionIds),
-    [rowState.archivedSessionIds],
-  );
-  const workspaceById = useMemo(
-    () => new Map(allWorkspaces.map((item) => [item.workspaceId, item])),
-    [allWorkspaces],
   );
   const pinnedRows = useMemo(
     () =>
