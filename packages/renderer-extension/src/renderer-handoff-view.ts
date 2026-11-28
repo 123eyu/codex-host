@@ -380,18 +380,48 @@ export function ensureRendererHandoffStyle(ownerDocument: Document): void {
       flex: 0 0 auto;
     }
     .codexhost-handoff-select {
+      -webkit-appearance: none;
+      appearance: none;
       width: 100%;
       height: 32px;
-      padding: 0 8px;
+      padding: 0 30px 0 10px;
       border-radius: 8px;
-      border: 1px solid light-dark(rgba(15, 23, 42, 0.14), rgba(255, 255, 255, 0.14));
-      background: light-dark(#f8f9fa, #141518);
+      border: 0;
+      background-color: light-dark(#ffffff, rgba(255, 255, 255, 0.045));
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23808080' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 9px center;
+      background-size: 14px 14px;
+      box-shadow:
+        0 0 0 0.5px light-dark(rgba(0, 0, 0, 0.12), rgba(255, 255, 255, 0.14)),
+        0 1px 2px 0 light-dark(rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.32));
       color: light-dark(#18181b, #ececec);
       font: 400 12.5px/1.2 inherit;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      cursor: pointer;
       box-sizing: border-box;
+      transition: background-color 140ms ease, box-shadow 140ms ease;
+    }
+    .codexhost-handoff-select:hover:not(:disabled) {
+      background-color: light-dark(#fafafa, rgba(255, 255, 255, 0.07));
+      box-shadow:
+        0 0 0 0.5px light-dark(rgba(0, 0, 0, 0.2), rgba(255, 255, 255, 0.22)),
+        0 1px 3px 0 light-dark(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.38));
+    }
+    .codexhost-handoff-select:focus-visible {
+      outline: none;
+      box-shadow:
+        0 0 0 1.5px light-dark(#0b75d1, #66aaf9),
+        0 0 0 3.5px light-dark(rgba(11, 117, 209, 0.16), rgba(102, 170, 249, 0.18));
     }
     .codexhost-handoff-select:disabled {
-      opacity: 0.6;
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .codexhost-handoff-select option {
+      background-color: light-dark(#ffffff, #1e1f23);
+      color: light-dark(#18181b, #ececec);
     }
     .codexhost-handoff-error {
       margin-top: 8px;

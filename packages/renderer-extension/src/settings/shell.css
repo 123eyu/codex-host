@@ -50,6 +50,63 @@
     font: inherit;
   }
 
+  select:not([multiple]):not([size]) {
+    -webkit-appearance: none;
+    appearance: none;
+    min-height: 32px;
+    padding: 5px 30px 5px 10px;
+    color: var(--settings-text);
+    font-size: 12.5px;
+    line-height: 20px;
+    background-color: light-dark(
+      #ffffff,
+      color-mix(in srgb, var(--settings-text) 4.5%, var(--settings-panel))
+    );
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23808080' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 9px center;
+    background-size: 14px 14px;
+    border: 0;
+    border-radius: 8px;
+    box-shadow:
+      0 0 0 0.5px light-dark(rgb(0 0 0 / 12%), rgb(255 255 255 / 14%)),
+      0 1px 2px 0 light-dark(rgb(0 0 0 / 5%), rgb(0 0 0 / 32%));
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+    transition:
+      background-color 140ms ease,
+      box-shadow 140ms ease,
+      color 140ms ease;
+  }
+
+  select:not([multiple]):not([size]):hover:not(:disabled) {
+    background-color: light-dark(
+      #fafafa,
+      color-mix(in srgb, var(--settings-text) 7%, var(--settings-panel))
+    );
+    box-shadow:
+      0 0 0 0.5px light-dark(rgb(0 0 0 / 20%), rgb(255 255 255 / 22%)),
+      0 1px 3px 0 light-dark(rgb(0 0 0 / 7%), rgb(0 0 0 / 38%));
+  }
+
+  select:not([multiple]):not([size]):focus-visible {
+    outline: none;
+    box-shadow:
+      0 0 0 1.5px var(--settings-focus),
+      0 0 0 3.5px color-mix(in srgb, var(--settings-focus) 16%, transparent);
+  }
+
+  select:not([multiple]):not([size]):disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  select option {
+    background-color: var(--settings-panel);
+    color: var(--settings-text);
+  }
+
   button {
     color: inherit;
   }
@@ -605,8 +662,7 @@
   min-width: 160px;
 }
 
-.settings-session-import-search input,
-.settings-session-import-pagination select {
+.settings-session-import-search input {
   min-height: 36px;
   padding: 6px 10px;
   color: var(--settings-text);
@@ -615,8 +671,17 @@
   border-radius: 6px;
 }
 
-.settings-session-import-search input:focus-visible,
-.settings-session-import-pagination select:focus-visible {
+.settings-session-import-pagination select {
+  min-height: 30px;
+  height: 30px;
+  padding: 4px 28px 4px 10px;
+  font-size: 12px;
+  line-height: 18px;
+  background-position: right 8px center;
+  border-radius: 7px;
+}
+
+.settings-session-import-search input:focus-visible {
   outline: 2px solid var(--settings-focus);
   outline-offset: 2px;
 }
@@ -5590,8 +5655,7 @@ dialog.settings-extensions-lightbox::backdrop {
   min-width: 0;
 }
 
-.settings-extension-schema__input,
-.settings-extension-schema__select {
+.settings-extension-schema__input {
   height: 32px;
   padding: 4px 10px;
   color: var(--settings-text);
@@ -5599,10 +5663,18 @@ dialog.settings-extensions-lightbox::backdrop {
   line-height: 20px;
   background: var(--settings-surface);
   border: 1px solid var(--settings-border);
-  border-radius: 7px;
+  border-radius: 8px;
   transition:
     border-color 140ms ease,
     background-color 140ms ease;
+}
+
+.settings-extension-schema__select {
+  height: 32px;
+  padding: 4px 30px 4px 10px;
+  font-size: 12.5px;
+  line-height: 20px;
+  border-radius: 8px;
 }
 
 .settings-extension-schema__input--text,
@@ -5617,8 +5689,7 @@ dialog.settings-extensions-lightbox::backdrop {
   font-variant-numeric: tabular-nums;
 }
 
-.settings-extension-schema__input:focus-visible,
-.settings-extension-schema__select:focus-visible {
+.settings-extension-schema__input:focus-visible {
   outline: 2px solid var(--settings-focus);
   outline-offset: 1px;
   border-color: var(--settings-focus);
@@ -5900,9 +5971,8 @@ dialog.settings-extensions-lightbox::backdrop {
   flex: none;
 }
 
-.settings-extensions-detail-settings__control .settings-extension-schema__input,
-.settings-extensions-detail-settings__control .settings-extension-schema__select {
-  background: var(--settings-panel);
+.settings-extensions-detail-settings__control .settings-extension-schema__input {
+  background-color: var(--settings-panel);
 }
 
 @media (max-width: 600px) {
